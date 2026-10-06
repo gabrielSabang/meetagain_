@@ -1,5 +1,5 @@
 using System.Security.Claims;
-using FirebaseAdmin.Auth;
+using MeetAgain.Server.Services.Mongo;
 using Microsoft.AspNetCore.Components.Authorization;
 using Microsoft.AspNetCore.Components.Server.ProtectedBrowserStorage;
 
@@ -8,28 +8,30 @@ namespace MeetAgain.Server.Services
     public class CustomAuthStateProvider : AuthenticationStateProvider
     {
         private const string TokenKey = "authToken";
-private readonly ProtectedSessionStorage _storage;
-private string? _token;
+        private readonly ProtectedSessionStorage _storage;
+        private readonly JwtTokenService _jwt;
+        private string? _token;
 
-public CustomAuthStateProvider(ProtectedSessionStorage storage)
-{
-    _storage = storage;
-}
-
+        public CustomAuthStateProvider(ProtectedSessionStorage storage, JwtTokenService jwt)
+        {
+            _storage = storage;
+            _jwt = jwt;
+        }
 
         public async Task SetTokenAsync(string? token)
         {
             _token = token;
 
-            if (string.IsNullOrWhiteSpace(token))
+            try
             {
-                // clear from local storage
-                await _storage.DeleteAsync(TokenKey);
+                if (string.IsNullOrWhiteSpace(token))
+                    await _storage.DeleteAsync(TokenKey);
+                else
+                    await _storage.SetAsync(TokenKey, token);
             }
-            else
+            catch
             {
-                // save to local storage
-                await _storage.SetAsync(TokenKey, token);
+                // JS interop unavailable (e.g. prerendering / API path) — keep in-memory token only.
             }
 
             NotifyAuthenticationStateChanged(GetAuthenticationStateAsync());
@@ -39,43 +41,36 @@ public CustomAuthStateProvider(ProtectedSessionStorage storage)
         {
             try
             {
-                // if we don't have a token in memory, try to load it from local storage
                 if (string.IsNullOrWhiteSpace(_token))
                 {
-                    var stored = await _storage.GetAsync<string>(TokenKey);
-                    if (stored.Success && !string.IsNullOrWhiteSpace(stored.Value))
+                    try
                     {
-                        _token = stored.Value;
+                        var stored = await _storage.GetAsync<string>(TokenKey);
+                        if (stored.Success && !string.IsNullOrWhiteSpace(stored.Value))
+                            _token = stored.Value;
+                    }
+                    catch
+                    {
+                        // ignore storage failures
                     }
                 }
-                Console.WriteLine($"AuthStateProvider: token is {(string.IsNullOrWhiteSpace(_token) ? "null/empty" : "present")}");
+
                 if (string.IsNullOrWhiteSpace(_token))
+                    return new AuthenticationState(new ClaimsPrincipal(new ClaimsIdentity()));
+
+                var principal = _jwt.ValidateToken(_token);
+                if (principal == null)
                 {
-                    // no token anywhere → anonymous user
+                    try { await _storage.DeleteAsync(TokenKey); } catch { }
+                    _token = null;
                     return new AuthenticationState(new ClaimsPrincipal(new ClaimsIdentity()));
                 }
 
-                // validate token with Firebase
-                var decoded = await FirebaseAuth.DefaultInstance.VerifyIdTokenAsync(_token);
-
-                decoded.Claims.TryGetValue("email", out var emailObj);
-                string email = emailObj?.ToString() ?? string.Empty;
-
-                var claims = new List<Claim>
-                {
-                    new Claim(ClaimTypes.NameIdentifier, decoded.Uid ?? string.Empty),
-                    new Claim(ClaimTypes.Email, email)
-                };
-
-                var identity = new ClaimsIdentity(claims, "firebase");
-                var principal = new ClaimsPrincipal(identity);
-
-                return new AuthenticationState(principal);
+                var identity = new ClaimsIdentity(principal.Claims, "jwt");
+                return new AuthenticationState(new ClaimsPrincipal(identity));
             }
             catch
             {
-                // token invalid → clear it and treat as anonymous
-                await _storage.DeleteAsync(TokenKey);
                 _token = null;
                 return new AuthenticationState(new ClaimsPrincipal(new ClaimsIdentity()));
             }

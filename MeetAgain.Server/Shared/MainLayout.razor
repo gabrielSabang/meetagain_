@@ -326,12 +326,6 @@
         localStorage.clear();
         sessionStorage.clear();
         
-        // Call Firebase logout
-        if (typeof logout === 'function') {
-            await logout();
-            console.log("Firebase signOut complete");
-        }
-        
         // Force full page reload to login page
         window.location.replace('/login');
     }

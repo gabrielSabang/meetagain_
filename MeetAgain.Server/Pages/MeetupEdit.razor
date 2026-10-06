@@ -1,6 +1,6 @@
 @page "/meetups/{MeetupId}/edit"
 @inject MeetupService MeetupService
-@inject FirestoreService FirestoreService
+@inject MeetAgain.Server.Services.Mongo.MongoService MongoService
 @inject AuthService Auth
 @inject NavigationManager Nav
 @inject AuthenticationStateProvider AuthStateProvider
@@ -160,7 +160,7 @@
 
         try
         {
-            meetup = await FirestoreService.GetMeetupByIdAsync(MeetupId);
+            meetup = await MongoService.GetMeetupByIdAsync(MeetupId);
 
             // Optional: if you only want the creator to edit:
             // if (meetup != null && meetup.CreatorUserId != uid)

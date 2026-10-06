@@ -1,6 +1,6 @@
 @page "/meetups/{MeetupId}"
 @inject MeetupService MeetupService
-@inject FirestoreService FirestoreService
+@inject MeetAgain.Server.Services.Mongo.MongoService MongoService
 @inject AuthService Auth
 @inject NavigationManager Nav
 @inject AuthenticationStateProvider AuthStateProvider
@@ -216,7 +216,7 @@
 
         try
         {
-            meetup = await FirestoreService.GetMeetupByIdAsync(MeetupId);
+            meetup = await MongoService.GetMeetupByIdAsync(MeetupId);
         }
         catch (Exception ex)
         {

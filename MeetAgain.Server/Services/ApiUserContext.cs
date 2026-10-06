@@ -1,12 +1,12 @@
 using System.Security.Claims;
-using FirebaseAdmin.Auth;
+using MeetAgain.Server.Services.Mongo;
+using Microsoft.Extensions.DependencyInjection;
 
 namespace MeetAgain.Server.Services
 {
     /// <summary>
     /// Stateless helper to resolve the calling user inside API controllers.
-    /// Priority: HttpContext claims -&gt; Bearer Firebase ID token -&gt; X-User-Id header -&gt; ?userId query.
-    /// This avoids depending on the Blazor-circuit AuthService.CurrentUser / ProtectedSessionStorage.
+    /// Priority: HttpContext claims -&gt; Bearer JWT -&gt; X-User-Id header -&gt; ?userId query.
     /// </summary>
     public static class ApiUserContext
     {
@@ -14,7 +14,8 @@ namespace MeetAgain.Server.Services
         {
             var uid = http.User?.FindFirst(ClaimTypes.NameIdentifier)?.Value
                 ?? http.User?.FindFirst("uid")?.Value
-                ?? http.User?.FindFirst("user_id")?.Value;
+                ?? http.User?.FindFirst("user_id")?.Value
+                ?? http.User?.FindFirst("sub")?.Value;
             return string.IsNullOrWhiteSpace(uid) ? null : uid;
         }
 
@@ -23,7 +24,7 @@ namespace MeetAgain.Server.Services
             string? userIdQuery = null,
             string? userIdBody = null)
         {
-            // 1. Claims already populated (if auth middleware ever added)
+            // 1. Claims already populated by JWT middleware
             var claimed = GetUserIdFromClaims(http);
             if (!string.IsNullOrWhiteSpace(claimed))
             {
@@ -31,7 +32,7 @@ namespace MeetAgain.Server.Services
                 return (claimed, email);
             }
 
-            // 2. Authorization: Bearer <Firebase ID token>
+            // 2. Authorization: Bearer <JWT>
             if (http.Request.Headers.TryGetValue("Authorization", out var authHeader))
             {
                 var bearer = authHeader.ToString();
@@ -40,28 +41,30 @@ namespace MeetAgain.Server.Services
                     var token = bearer["Bearer ".Length..].Trim();
                     if (!string.IsNullOrWhiteSpace(token))
                     {
-                        try
+                        var jwt = http.RequestServices.GetService<JwtTokenService>();
+                        var principal = jwt?.ValidateToken(token);
+                        if (principal != null)
                         {
-                            var decoded = await FirebaseAuth.DefaultInstance.VerifyIdTokenAsync(token);
-                            decoded.Claims.TryGetValue("email", out var emailObj);
-                            return (decoded.Uid, emailObj?.ToString());
-                        }
-                        catch
-                        {
-                            // fall through to header/query fallback (dev convenience)
+                            var uid = principal.FindFirst(ClaimTypes.NameIdentifier)?.Value
+                                ?? principal.FindFirst("uid")?.Value;
+                            var em = principal.FindFirst(ClaimTypes.Email)?.Value;
+                            if (!string.IsNullOrWhiteSpace(uid))
+                                return (uid, em);
                         }
                     }
                 }
             }
 
-            // 3. X-User-Id header (simple stateless auth for dev/mobile without full Bearer flow)
+            await Task.CompletedTask;
+
+            // 3. X-User-Id header (dev convenience; logged by controllers when used)
             if (http.Request.Headers.TryGetValue("X-User-Id", out var headerUid))
             {
                 var h = headerUid.ToString().Trim();
                 if (!string.IsNullOrWhiteSpace(h)) return (h, null);
             }
 
-            // 4. Explicit userId from query string or body
+            // 4. Explicit userId from body or query
             if (!string.IsNullOrWhiteSpace(userIdBody)) return (userIdBody.Trim(), null);
             if (!string.IsNullOrWhiteSpace(userIdQuery)) return (userIdQuery.Trim(), null);
             if (http.Request.Query.TryGetValue("userId", out var q))

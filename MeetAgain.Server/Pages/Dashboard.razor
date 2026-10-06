@@ -1,14 +1,15 @@
 @page "/dashboard"
-@using Google.Cloud.Firestore
 @using MeetAgain.Server.Models
 @using MeetAgain.Server.Services
+@using MeetAgain.Server.Services.Mongo
+@using MongoDB.Driver
 @inject MeetupService MeetupService
 @inject FriendService FriendService
 @inject GroupService GroupService
 @inject AuthService Auth
 @inject NavigationManager Nav
 @inject AuthenticationStateProvider AuthStateProvider
-@inject FirestoreDb FirestoreDb
+@inject MongoDbContext Mongo
 
 <PageTitle>Dashboard - MeetAgain</PageTitle>
 
@@ -234,29 +235,27 @@ else
 
             Console.WriteLine($"Dashboard: Retrieved userId = {userId}");
 
-            // LOAD USERNAME FROM FIRESTORE
+            // LOAD USERNAME FROM MONGODB
             if (!string.IsNullOrEmpty(userId))
             {
                 try
                 {
-                    Console.WriteLine($"Dashboard: Fetching user document from Firestore for userId: {userId}");
-                    
-                    var userDoc = await FirestoreDb.Collection("users").Document(userId).GetSnapshotAsync();
-                    
-                    if (userDoc.Exists)
+                    Console.WriteLine($"Dashboard: Fetching user document from MongoDB for userId: {userId}");
+
+                    var user = await Mongo.Users.Find(u => u.Uid == userId).FirstOrDefaultAsync();
+
+                    if (user != null)
                     {
-                        var userData = userDoc.ToDictionary();
-                        
                         // Try DisplayName first
-                        if (userData.ContainsKey("DisplayName") && !string.IsNullOrWhiteSpace(userData["DisplayName"]?.ToString()))
+                        if (!string.IsNullOrWhiteSpace(user.DisplayName))
                         {
-                            displayName = userData["DisplayName"]!.ToString()!;
-                            Console.WriteLine($"Dashboard: Loaded DisplayName from Firestore: {displayName}");
+                            displayName = user.DisplayName;
+                            Console.WriteLine($"Dashboard: Loaded DisplayName from MongoDB: {displayName}");
                         }
                         // Fallback to Email if DisplayName is empty
-                        else if (userData.ContainsKey("Email") && !string.IsNullOrWhiteSpace(userData["Email"]?.ToString()))
+                        else if (!string.IsNullOrWhiteSpace(user.Email))
                         {
-                            displayName = userData["Email"]!.ToString()!;
+                            displayName = user.Email;
                             Console.WriteLine($"Dashboard: DisplayName empty, using Email: {displayName}");
                         }
                         else
@@ -267,7 +266,7 @@ else
                     }
                     else
                     {
-                        Console.WriteLine($"Dashboard: User document does not exist in Firestore for userId: {userId}");
+                        Console.WriteLine($"Dashboard: User document does not exist in MongoDB for userId: {userId}");
                         // Fallback to email from claims
                         var email = principal.FindFirst(c => c.Type == System.Security.Claims.ClaimTypes.Email)?.Value;
                         displayName = !string.IsNullOrEmpty(email) ? email : "User";
@@ -276,7 +275,7 @@ else
                 }
                 catch (Exception ex)
                 {
-                    Console.WriteLine($"Dashboard: ERROR loading user data from Firestore - {ex.Message}");
+                    Console.WriteLine($"Dashboard: ERROR loading user data from MongoDB - {ex.Message}");
                     Console.WriteLine($"Dashboard: Stack trace: {ex.StackTrace}");
                     
                     // Final fallback to claims

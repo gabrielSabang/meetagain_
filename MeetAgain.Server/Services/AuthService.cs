@@ -1,193 +1,117 @@
-using FirebaseAdmin.Auth;
-using Google.Cloud.Firestore;
 using MeetAgain.Server.Models;
-using System.Net.Http.Json;
-using System.Text.Json;
-using System.Threading.Tasks;
-
-using System;
+using MeetAgain.Server.Services.Mongo;
 
 namespace MeetAgain.Server.Services
 {
     public class AuthService
     {
-private readonly FirestoreService _fs;
-private readonly HttpClient _http = new();
-private readonly string _apiKey;
+        private readonly MongoService _db;
+        private readonly JwtTokenService _jwt;
 
         public AppUser? CurrentUser { get; private set; }
+        public string? CurrentToken { get; private set; }
         public string? UserId => CurrentUser?.Uid;
 
         public CustomAuthStateProvider? AuthStateProvider { get; set; }
 
-        // -----------------------------
-        // New: exposes last Firebase error
-        // -----------------------------
-        public string? LastFirebaseError { get; private set; }
+        /// <summary>Exposes last auth error (renamed from LastFirebaseError; kept as alias for pages).</summary>
+        public string? LastAuthError { get; private set; }
+        public string? LastFirebaseError => LastAuthError;
 
-public AuthService(FirestoreService fs, string firebaseApiKey)
-{
-    _fs = fs ?? throw new ArgumentNullException(nameof(fs));
-    _apiKey = firebaseApiKey ?? throw new ArgumentNullException(nameof(firebaseApiKey));
-}
-// ------------------------------------------------------
-// REGISTER
-// ------------------------------------------------------
-public async Task<bool> SignUpAsync(string email, string password, string displayName)
-{
-    UserRecord? fbUser = null;
-    try
-    {
-        // Create Firebase Auth user
-        fbUser = await FirebaseAuth.DefaultInstance.CreateUserAsync(new UserRecordArgs
+        public AuthService(MongoService db, JwtTokenService jwt)
         {
-            Email = email,
-            Password = password,
-            DisplayName = displayName
-        });
-    }
-    catch (FirebaseAuthException ex) when (ex.AuthErrorCode == AuthErrorCode.EmailAlreadyExists)
-    {
-        LastFirebaseError = "Email already exists.";
-        Console.WriteLine("Registration failed: " + LastFirebaseError);
-        return false;
-    }
-    catch (Exception ex)
-    {
-        LastFirebaseError = "Firebase registration failed: " + ex.Message;
-        Console.WriteLine(LastFirebaseError);
-        return false;
-    }
-
-    // Create Firestore user document
-    var user = new AppUser
-    {
-        Uid = fbUser.Uid,
-        Email = fbUser.Email ?? email,
-        DisplayName = displayName,
-        CreatedAt = DateTime.UtcNow.ToString("o")
-    };
-
-    try
-    {
-        await _fs.CreateOrUpdateUserAsync(user);
-    }
-    catch (Exception ex)
-    {
-        // Rollback Firebase user if Firestore write fails
-        try
-        {
-            await FirebaseAuth.DefaultInstance.DeleteUserAsync(fbUser.Uid);
+            _db = db ?? throw new ArgumentNullException(nameof(db));
+            _jwt = jwt ?? throw new ArgumentNullException(nameof(jwt));
         }
-        catch { /* ignore rollback failure */ }
 
-        LastFirebaseError = "Failed to write user to Firestore: " + ex.Message;
-        Console.WriteLine(LastFirebaseError);
-        return false;
-    }
-
-    CurrentUser = user;
-    LastFirebaseError = null;
-    Console.WriteLine($"Registration successful: {email}");
-    return true;
-}
-
-
-        // ------------------------------------------------------
-        // LOGIN VIA FIREBASE REST API
-        // ------------------------------------------------------
-        public async Task<bool> LoginAsync(string email, string password)
+        // ---------------- REGISTER ----------------
+        public async Task<bool> SignUpAsync(string email, string password, string displayName)
         {
+            if (string.IsNullOrWhiteSpace(email) || string.IsNullOrWhiteSpace(password) || string.IsNullOrWhiteSpace(displayName))
+            {
+                LastAuthError = "Email, password and display name are required.";
+                return false;
+            }
+
             try
             {
-                var url = $"https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key={_apiKey}";
-
-                var payload = new
+                var existing = await _db.GetUserByEmailAsync(email.Trim().ToLowerInvariant());
+                if (existing != null)
                 {
-                    email = email,
-                    password = password,
-                    returnSecureToken = true
+                    LastAuthError = "Email already exists.";
+                    return false;
+                }
+
+                var user = new AppUser
+                {
+                    Uid = Guid.NewGuid().ToString("N"),
+                    Email = email.Trim().ToLowerInvariant(),
+                    DisplayName = displayName.Trim(),
+                    CreatedAt = DateTime.UtcNow.ToString("o"),
+                    PasswordHash = BCrypt.Net.BCrypt.HashPassword(password),
                 };
-
-                var response = await _http.PostAsJsonAsync(url, payload);
-                var rawResponse = await response.Content.ReadAsStringAsync();
-
-                Console.WriteLine("Firebase Login Response: " + rawResponse);
-
-                if (!response.IsSuccessStatusCode)
-                {
-                    LastFirebaseError = rawResponse;
-                    Console.WriteLine($"Login failed! Status code: {response.StatusCode}");
-                    return false;
-                }
-
-                var json = JsonDocument.Parse(rawResponse).RootElement;
-
-                string idToken = json.TryGetProperty("idToken", out var idTokenProp)
-                    ? idTokenProp.GetString() ?? ""
-                    : "";
-
-                string localId = json.TryGetProperty("localId", out var localIdProp)
-                    ? localIdProp.GetString() ?? ""
-                    : "";
-
-                if (string.IsNullOrWhiteSpace(idToken) || string.IsNullOrWhiteSpace(localId))
-                {
-                    LastFirebaseError = "idToken or localId missing from Firebase response.";
-                    Console.WriteLine(LastFirebaseError);
-                    return false;
-                }
-
-                var user = await _fs.GetUserAsync(localId);
-                if (user == null)
-                {
-                    LastFirebaseError = "User not found in Firestore.";
-                    Console.WriteLine(LastFirebaseError);
-                    return false;
-                }
+                await _db.CreateOrUpdateUserAsync(user);
 
                 CurrentUser = user;
-
+                CurrentToken = _jwt.IssueToken(user.Uid, user.Email);
                 if (AuthStateProvider != null)
-                    await AuthStateProvider.SetTokenAsync(idToken);
+                    await AuthStateProvider.SetTokenAsync(CurrentToken);
 
-                LastFirebaseError = null;
-                Console.WriteLine($"Login successful: {email}");
+                LastAuthError = null;
                 return true;
             }
             catch (Exception ex)
             {
-                LastFirebaseError = ex.Message;
-                Console.WriteLine("Login Exception: " + ex);
+                LastAuthError = "Registration failed: " + ex.Message;
                 return false;
             }
         }
 
-        // ------------------------------------------------------
-        // LOGOUT
-        // ------------------------------------------------------
-        public async Task LogoutAsync()
-{
-    Console.WriteLine("LogoutAsync CALLED");
-
-    CurrentUser = null;
-    if (AuthStateProvider != null)
-        await AuthStateProvider.SetTokenAsync(null);
-
-    LastFirebaseError = null;
-    Console.WriteLine("User logged out.");
-}
-
-
-
-
-
-        // ------------------------------------------------------
-        // REQUIRED BY PAGES
-        // ------------------------------------------------------
-        public Task<AppUser?> GetCurrentUserAsync()
+        // ---------------- LOGIN (Mongo + BCrypt, issues JWT) ----------------
+        public async Task<bool> LoginAsync(string email, string password)
         {
-            return Task.FromResult(CurrentUser);
+            try
+            {
+                var user = await _db.GetUserByEmailAsync(email.Trim().ToLowerInvariant());
+                if (user == null || string.IsNullOrEmpty(user.PasswordHash) ||
+                    !BCrypt.Net.BCrypt.Verify(password, user.PasswordHash))
+                {
+                    LastAuthError = "Invalid email or password.";
+                    return false;
+                }
+
+                CurrentUser = user;
+                CurrentToken = _jwt.IssueToken(user.Uid, user.Email);
+                if (AuthStateProvider != null)
+                    await AuthStateProvider.SetTokenAsync(CurrentToken);
+
+                LastAuthError = null;
+                return true;
+            }
+            catch (Exception ex)
+            {
+                LastAuthError = ex.Message;
+                return false;
+            }
         }
+
+        /// <summary>Used by POST /api/auth/login to also return the token.</summary>
+        public async Task<(bool Ok, string? Token, AppUser? User, string? Error)> LoginWithTokenAsync(string email, string password)
+        {
+            var ok = await LoginAsync(email, password);
+            return ok ? (true, CurrentToken, CurrentUser, null) : (false, null, null, LastAuthError);
+        }
+
+        // ---------------- LOGOUT ----------------
+        public async Task LogoutAsync()
+        {
+            CurrentUser = null;
+            CurrentToken = null;
+            if (AuthStateProvider != null)
+                await AuthStateProvider.SetTokenAsync(null);
+            LastAuthError = null;
+        }
+
+        public Task<AppUser?> GetCurrentUserAsync() => Task.FromResult(CurrentUser);
     }
 }

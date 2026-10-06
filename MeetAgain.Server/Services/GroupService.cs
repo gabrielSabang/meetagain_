@@ -1,376 +1,147 @@
-using Google.Cloud.Firestore;
 using MeetAgain.Server.Models;
+using MeetAgain.Server.Services.Mongo;
+using MongoDB.Driver;
 
 namespace MeetAgain.Server.Services
 {
     public class GroupService
     {
-        private readonly FirestoreDb _db;
+        private readonly MongoDbContext _ctx;
         private readonly AuthService _auth;
         private readonly CurrentUserAccessor _currentUser;
 
-        public GroupService(FirestoreDb db, AuthService auth, CurrentUserAccessor currentUser)
+        public GroupService(MongoDbContext ctx, AuthService auth, CurrentUserAccessor currentUser)
         {
-            _db = db;
+            _ctx = ctx;
             _auth = auth;
             _currentUser = currentUser;
         }
 
-        // CREATE GROUP
+        private async Task<string?> CurrentUidAsync()
+        {
+            var (uid, _) = await _currentUser.GetUserAsync();
+            return string.IsNullOrEmpty(uid) ? _auth.UserId : uid;
+        }
+
         public async Task<string?> CreateGroupAsync(CreateGroupModel model)
         {
-            var (currentUserId, _) = await _currentUser.GetUserAsync();
-            if (string.IsNullOrEmpty(currentUserId))
-            {
-                currentUserId = _auth.UserId;
-            }
-            
-            if (string.IsNullOrEmpty(currentUserId)) return null;
-
+            var uid = await CurrentUidAsync();
+            if (string.IsNullOrEmpty(uid)) return null;
             try
             {
-                var userDoc = await _db.Collection("users").Document(currentUserId).GetSnapshotAsync();
-                if (!userDoc.Exists) return null;
-
-                var userData = userDoc.ToDictionary();
-                var ownerName = userData.ContainsKey("DisplayName") ? userData["DisplayName"]?.ToString() ?? "" : "";
+                var me = await _ctx.Users.Find(u => u.Uid == uid).FirstOrDefaultAsync();
+                if (me == null) return null;
 
                 var groupId = Guid.NewGuid().ToString("N");
-
-                var group = new Group
+                await _ctx.Groups.InsertOneAsync(new Models.Group
                 {
-                    Id = groupId,
-                    OwnerId = currentUserId,
-                    OwnerName = ownerName,
-                    Name = model.Name,
-                    Description = model.Description,
+                    Id = groupId, OwnerId = uid, OwnerName = me.DisplayName,
+                    Name = model.Name, Description = model.Description,
                     MemberCount = model.InitialMemberIds?.Count ?? 0,
-                    CreatedAt = DateTime.UtcNow.ToString("o")
-                };
+                    CreatedAt = DateTime.UtcNow.ToString("o"),
+                });
 
-                await _db.Collection("groups").Document(groupId).SetAsync(group);
-                Console.WriteLine($"✅ Group created: {groupId}");
-
-                if (model.InitialMemberIds != null && model.InitialMemberIds.Count > 0)
-                {
+                if (model.InitialMemberIds is { Count: > 0 })
                     await AddMembersToGroupAsync(groupId, model.InitialMemberIds);
-                }
 
                 return groupId;
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"❌ Error creating group: {ex.Message}");
+                Console.WriteLine($"Error creating group: {ex.Message}");
                 return null;
             }
         }
 
-        // GET MY GROUPS - FIXED FOR HARD RELOAD
         public async Task<List<GroupDto>> GetMyGroupsAsync()
         {
-            // CRITICAL FIX: Always wait for authentication first
-            var (currentUserId, _) = await _currentUser.GetUserAsync();
-            
-            // Fallback to AuthService
-            if (string.IsNullOrEmpty(currentUserId))
-            {
-                currentUserId = _auth.UserId;
-            }
-            
-            if (string.IsNullOrEmpty(currentUserId))
-            {
-                Console.WriteLine("❌ GetMyGroups: User not authenticated (waiting for auth state)");
-                return new List<GroupDto>();
-            }
+            var uid = await CurrentUidAsync();
+            if (string.IsNullOrEmpty(uid)) return new();
 
-            try
-            {
-                Console.WriteLine($"👥 Getting groups for user: {currentUserId}");
-                
-                var groups = new List<GroupDto>();
-                var allGroupsSnapshot = await _db.Collection("groups").GetSnapshotAsync();
+            var owned = await _ctx.Groups.Find(g => g.OwnerId == uid).ToListAsync();
+            var memberships = await _ctx.GroupMembers.Find(m => m.UserId == uid).ToListAsync();
+            var memberGroupIds = memberships.Select(m => m.GroupId).Distinct().ToHashSet();
+            var memberGroups = memberGroupIds.Count > 0
+                ? await _ctx.Groups.Find(g => memberGroupIds.Contains(g.Id)).ToListAsync()
+                : new List<Models.Group>();
 
-                Console.WriteLine($"  └─ Found {allGroupsSnapshot.Count} total group(s) in Firestore");
-
-                foreach (var groupDoc in allGroupsSnapshot.Documents)
-                {
-                    var group = groupDoc.ConvertTo<Group>();
-
-                    // Check if user is the owner
-                    if (group.OwnerId == currentUserId)
-                    {
-                        groups.Add(new GroupDto
-                        {
-                            Id = group.Id,
-                            OwnerId = group.OwnerId,
-                            OwnerName = group.OwnerName,
-                            Name = group.Name,
-                            Description = group.Description,
-                            MemberCount = group.MemberCount,
-                            CreatedAt = group.CreatedAt,
-                            IsOwner = true
-                        });
-                        Console.WriteLine($"  └─ Added owned group: {group.Name}");
-                        continue;
-                    }
-
-                    // Check if user is a member
-                    var memberDoc = await _db.Collection("groups")
-                        .Document(group.Id)
-                        .Collection("members")
-                        .Document(currentUserId)
-                        .GetSnapshotAsync();
-
-                    if (memberDoc.Exists)
-                    {
-                        groups.Add(new GroupDto
-                        {
-                            Id = group.Id,
-                            OwnerId = group.OwnerId,
-                            OwnerName = group.OwnerName,
-                            Name = group.Name,
-                            Description = group.Description,
-                            MemberCount = group.MemberCount,
-                            CreatedAt = group.CreatedAt,
-                            IsOwner = false
-                        });
-                        Console.WriteLine($"  └─ Added member group: {group.Name}");
-                    }
-                }
-
-                Console.WriteLine($"✅ Returning {groups.Count} group(s)");
-                return groups.OrderBy(g => g.Name).ToList();
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"❌ Error getting groups: {ex.Message}");
-                Console.WriteLine($"Stack trace: {ex.StackTrace}");
-                return new List<GroupDto>();
-            }
+            var result = owned.Select(g => ToDto(g, true))
+                .Concat(memberGroups.Where(g => g.OwnerId != uid).Select(g => ToDto(g, false)))
+                .OrderBy(g => g.Name).ToList();
+            return result;
         }
 
-        // GET GROUP DETAILS
         public async Task<GroupDto?> GetGroupDetailAsync(string groupId)
         {
-            var (currentUserId, _) = await _currentUser.GetUserAsync();
-            if (string.IsNullOrEmpty(currentUserId))
-            {
-                currentUserId = _auth.UserId;
-            }
-            
-            if (string.IsNullOrEmpty(currentUserId)) return null;
-
-            try
-            {
-                var groupDoc = await _db.Collection("groups").Document(groupId).GetSnapshotAsync();
-                if (!groupDoc.Exists) return null;
-
-                var group = groupDoc.ConvertTo<Group>();
-
-                var membersSnapshot = await _db.Collection("groups")
-                    .Document(groupId)
-                    .Collection("members")
-                    .GetSnapshotAsync();
-
-                var members = new List<GroupMember>();
-                foreach (var doc in membersSnapshot.Documents)
-                {
-                    members.Add(doc.ConvertTo<GroupMember>());
-                }
-
-                return new GroupDto
-                {
-                    Id = group.Id,
-                    OwnerId = group.OwnerId,
-                    OwnerName = group.OwnerName,
-                    Name = group.Name,
-                    Description = group.Description,
-                    MemberCount = group.MemberCount,
-                    CreatedAt = group.CreatedAt,
-                    IsOwner = group.OwnerId == currentUserId,
-                    Members = members.OrderBy(m => m.Name).ToList()
-                };
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"❌ Error getting group detail: {ex.Message}");
-                return null;
-            }
+            var uid = await CurrentUidAsync();
+            if (string.IsNullOrEmpty(uid)) return null;
+            var group = await _ctx.Groups.Find(g => g.Id == groupId).FirstOrDefaultAsync();
+            if (group == null) return null;
+            var members = await _ctx.GroupMembers.Find(m => m.GroupId == groupId).SortBy(m => m.Name).ToListAsync();
+            var dto = ToDto(group, group.OwnerId == uid);
+            dto.Members = members;
+            return dto;
         }
 
-        // GET GROUP BY ID (used by CreateMeetup)
-        public async Task<GroupDto?> GetGroupByIdAsync(string groupId)
-        {
-            return await GetGroupDetailAsync(groupId);
-        }
+        public Task<GroupDto?> GetGroupByIdAsync(string groupId) => GetGroupDetailAsync(groupId);
 
-        // ADD MEMBERS TO GROUP
         public async Task<bool> AddMembersToGroupAsync(string groupId, List<string> friendIds)
         {
-            var (currentUserId, _) = await _currentUser.GetUserAsync();
-            if (string.IsNullOrEmpty(currentUserId))
+            var uid = await CurrentUidAsync();
+            if (string.IsNullOrEmpty(uid)) return false;
+            var group = await _ctx.Groups.Find(g => g.Id == groupId).FirstOrDefaultAsync();
+            if (group == null || group.OwnerId != uid) return false;
+
+            var added = 0;
+            foreach (var fid in friendIds.Distinct())
             {
-                currentUserId = _auth.UserId;
-            }
-            
-            if (string.IsNullOrEmpty(currentUserId)) return false;
-
-            try
-            {
-                var groupDoc = await _db.Collection("groups").Document(groupId).GetSnapshotAsync();
-                if (!groupDoc.Exists) return false;
-
-                var group = groupDoc.ConvertTo<Group>();
-                if (group.OwnerId != currentUserId) return false;
-
-                var batch = _db.StartBatch();
-                var addedCount = 0;
-
-                foreach (var friendId in friendIds)
+                if (await _ctx.GroupMembers.Find(m => m.Id == $"{groupId}:{fid}").AnyAsync()) continue;
+                var friend = await _ctx.Users.Find(u => u.Uid == fid).FirstOrDefaultAsync();
+                if (friend == null) continue;
+                await _ctx.GroupMembers.InsertOneAsync(new GroupMember
                 {
-                    var existingMember = await _db.Collection("groups")
-                        .Document(groupId)
-                        .Collection("members")
-                        .Document(friendId)
-                        .GetSnapshotAsync();
-
-                    if (existingMember.Exists) continue;
-
-                    var friendDoc = await _db.Collection("users").Document(friendId).GetSnapshotAsync();
-                    if (!friendDoc.Exists) continue;
-
-                    var friendData = friendDoc.ToDictionary();
-                    var member = new GroupMember
-                    {
-                        UserId = friendId,
-                        Name = friendData.ContainsKey("DisplayName") ? friendData["DisplayName"]?.ToString() ?? "" : "",
-                        Email = friendData.ContainsKey("Email") ? friendData["Email"]?.ToString() ?? "" : "",
-                        AddedAt = DateTime.UtcNow.ToString("o"),
-                        AddedBy = currentUserId
-                    };
-
-                    batch.Set(_db.Collection("groups").Document(groupId).Collection("members").Document(friendId), member);
-                    addedCount++;
-                }
-
-                if (addedCount > 0)
-                {
-                    batch.Update(_db.Collection("groups").Document(groupId), new Dictionary<string, object>
-                    {
-                        { "MemberCount", group.MemberCount + addedCount }
-                    });
-                }
-
-                await batch.CommitAsync();
-                return true;
+                    Id = $"{groupId}:{fid}", GroupId = groupId, UserId = fid,
+                    Name = friend.DisplayName, Email = friend.Email,
+                    AddedAt = DateTime.UtcNow.ToString("o"), AddedBy = uid,
+                });
+                added++;
             }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"❌ Error adding members: {ex.Message}");
-                return false;
-            }
+            if (added > 0)
+                await _ctx.Groups.UpdateOneAsync(g => g.Id == groupId,
+                    Builders<Models.Group>.Update.Inc(g => g.MemberCount, added));
+            return true;
         }
 
-        // REMOVE MEMBER
         public async Task<bool> RemoveMemberAsync(string groupId, string memberId)
         {
-            var (currentUserId, _) = await _currentUser.GetUserAsync();
-            if (string.IsNullOrEmpty(currentUserId))
-            {
-                currentUserId = _auth.UserId;
-            }
-            
-            if (string.IsNullOrEmpty(currentUserId)) return false;
-
-            try
-            {
-                var groupDoc = await _db.Collection("groups").Document(groupId).GetSnapshotAsync();
-                if (!groupDoc.Exists) return false;
-
-                var group = groupDoc.ConvertTo<Group>();
-                if (group.OwnerId != currentUserId) return false;
-
-                var batch = _db.StartBatch();
-                batch.Delete(_db.Collection("groups").Document(groupId).Collection("members").Document(memberId));
-                batch.Update(_db.Collection("groups").Document(groupId), new Dictionary<string, object>
-                {
-                    { "MemberCount", Math.Max(0, group.MemberCount - 1) }
-                });
-
-                await batch.CommitAsync();
-                return true;
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"❌ Error removing member: {ex.Message}");
-                return false;
-            }
+            var uid = await CurrentUidAsync();
+            if (string.IsNullOrEmpty(uid)) return false;
+            var group = await _ctx.Groups.Find(g => g.Id == groupId).FirstOrDefaultAsync();
+            if (group == null || group.OwnerId != uid) return false;
+            await _ctx.GroupMembers.DeleteOneAsync(m => m.Id == $"{groupId}:{memberId}");
+            await _ctx.Groups.UpdateOneAsync(g => g.Id == groupId,
+                Builders<Models.Group>.Update.Inc(g => g.MemberCount, -1));
+            return true;
         }
 
-        // DELETE GROUP
         public async Task<bool> DeleteGroupAsync(string groupId)
         {
-            var (currentUserId, _) = await _currentUser.GetUserAsync();
-            if (string.IsNullOrEmpty(currentUserId))
-            {
-                currentUserId = _auth.UserId;
-            }
-            
-            if (string.IsNullOrEmpty(currentUserId)) return false;
-
-            try
-            {
-                var groupDoc = await _db.Collection("groups").Document(groupId).GetSnapshotAsync();
-                if (!groupDoc.Exists) return false;
-
-                var group = groupDoc.ConvertTo<Group>();
-                if (group.OwnerId != currentUserId) return false;
-
-                var membersSnapshot = await _db.Collection("groups")
-                    .Document(groupId)
-                    .Collection("members")
-                    .GetSnapshotAsync();
-
-                var batch = _db.StartBatch();
-                foreach (var doc in membersSnapshot.Documents)
-                {
-                    batch.Delete(doc.Reference);
-                }
-
-                batch.Delete(_db.Collection("groups").Document(groupId));
-                await batch.CommitAsync();
-
-                return true;
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"❌ Error deleting group: {ex.Message}");
-                return false;
-            }
+            var uid = await CurrentUidAsync();
+            if (string.IsNullOrEmpty(uid)) return false;
+            var group = await _ctx.Groups.Find(g => g.Id == groupId).FirstOrDefaultAsync();
+            if (group == null || group.OwnerId != uid) return false;
+            await _ctx.GroupMembers.DeleteManyAsync(m => m.GroupId == groupId);
+            await _ctx.Groups.DeleteOneAsync(g => g.Id == groupId);
+            return true;
         }
 
-        // GET GROUP MEMBER IDS
         public async Task<List<string>> GetGroupMemberIdsAsync(string groupId)
-        {
-            try
-            {
-                Console.WriteLine($"Getting member IDs for group: {groupId}");
-                
-                var membersSnapshot = await _db.Collection("groups")
-                    .Document(groupId)
-                    .Collection("members")
-                    .GetSnapshotAsync();
+            => (await _ctx.GroupMembers.Find(m => m.GroupId == groupId).ToListAsync()).Select(m => m.UserId).ToList();
 
-                var memberIds = membersSnapshot.Documents.Select(d => d.Id).ToList();
-                Console.WriteLine($"  └─ Found {memberIds.Count} member(s)");
-                
-                return memberIds;
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"❌ Error getting group member IDs: {ex.Message}");
-                return new List<string>();
-            }
-        }
+        private static GroupDto ToDto(Models.Group g, bool isOwner) => new()
+        {
+            Id = g.Id, OwnerId = g.OwnerId, OwnerName = g.OwnerName, Name = g.Name,
+            Description = g.Description, MemberCount = g.MemberCount, CreatedAt = g.CreatedAt, IsOwner = isOwner,
+        };
     }
 }

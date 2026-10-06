@@ -1,53 +1,59 @@
-using Google.Cloud.Firestore;
 using MeetAgain.Server.Models;
 using MeetAgain.Server.Services;
+using MeetAgain.Server.Services.Mongo;
 using Microsoft.AspNetCore.Mvc;
+using MongoDB.Driver;
 
 namespace MeetAgain.Server.Controllers
 {
     [ApiController]
     [Route("api/meetups")]
+    [Route("api/v1/meetups")]
     public class MeetupsController : ControllerBase
     {
-        private readonly FirestoreDb _db;
+        private readonly MongoDbContext _ctx;
 
-        public MeetupsController(FirestoreDb db)
-        {
-            _db = db;
-        }
+        public MeetupsController(MongoDbContext ctx) => _ctx = ctx;
 
         private Task<string?> CallerUidAsync(string? q = null, string? b = null)
             => ApiUserContext.RequireUserIdAsync(HttpContext, q, b);
 
-        private IActionResult NeedAuth() =>
-            Unauthorized(new { error = "Missing user identity. Send Authorization: Bearer <FirebaseIdToken>, X-User-Id header, or userId in query/body." });
+        private static IActionResult NeedAuth() => new UnauthorizedObjectResult(ApiErrors.Unauthorized());
 
-        // GET /api/meetups?userId={uid}
+        private static MeetupDto ToDto(Meetup m, string uid, string rsvp) => new()
+        {
+            Id = m.Id, Title = m.Title, Description = m.Description,
+            CreatorUserId = m.CreatorUserId, CreatorName = m.CreatorName,
+            Location = m.Location, EventDateTime = m.EventDateTime,
+            CreatedAt = m.CreatedAt, Status = m.Status,
+            ParticipantCount = m.ParticipantCount,
+            IsCreator = m.CreatorUserId == uid, MyRSVPStatus = rsvp,
+        };
+
+        // GET /api/meetups?userId={uid}&page=&pageSize=
         [HttpGet]
-        public async Task<IActionResult> GetMine([FromQuery] string? userId)
+        public async Task<IActionResult> GetMine([FromQuery] string? userId, [FromQuery] int? page, [FromQuery] int? pageSize)
         {
             var uid = await CallerUidAsync(userId);
             if (uid == null) return NeedAuth();
 
-            var all = await _db.Collection("meetups").GetSnapshotAsync();
-            var result = new List<MeetupDto>();
-            foreach (var doc in all.Documents)
+            var parts = await _ctx.MeetupParticipants.Find(p => p.UserId == uid).ToListAsync();
+            var byMeetup = parts.ToDictionary(p => p.MeetupId);
+            var ids = byMeetup.Keys.ToHashSet();
+            var meetups = await _ctx.Meetups.Find(m => ids.Contains(m.Id)).SortBy(m => m.EventDateTime).ToListAsync();
+            var result = meetups.Select(m => ToDto(m, uid, byMeetup[m.Id].Status)).ToList();
+
+            if (page.HasValue || pageSize.HasValue)
             {
-                var meetup = doc.ConvertTo<Meetup>();
-                var part = await _db.Collection("meetups").Document(doc.Id).Collection("participants").Document(uid).GetSnapshotAsync();
-                if (!part.Exists) continue;
-                var p = part.ConvertTo<MeetupParticipant>();
-                result.Add(new MeetupDto
+                var p = page.GetValueOrDefault(1);
+                var ps = Math.Clamp(pageSize.GetValueOrDefault(20), 1, 100);
+                return Ok(new PagedResult<MeetupDto>
                 {
-                    Id = meetup.Id, Title = meetup.Title, Description = meetup.Description,
-                    CreatorUserId = meetup.CreatorUserId, CreatorName = meetup.CreatorName,
-                    Location = meetup.Location, EventDateTime = meetup.EventDateTime,
-                    CreatedAt = meetup.CreatedAt, Status = meetup.Status,
-                    ParticipantCount = meetup.ParticipantCount,
-                    IsCreator = meetup.CreatorUserId == uid, MyRSVPStatus = p.Status
+                    Data = result.Skip((p - 1) * ps).Take(ps).ToList(),
+                    Page = p, PageSize = ps, Total = result.Count,
                 });
             }
-            return Ok(result.OrderBy(m => m.EventDateTime).ToList());
+            return Ok(result);
         }
 
         // GET /api/meetups/{id}?userId={uid}
@@ -57,18 +63,14 @@ namespace MeetAgain.Server.Controllers
             var uid = await CallerUidAsync(userId);
             if (uid == null) return NeedAuth();
 
-            var doc = await _db.Collection("meetups").Document(id).GetSnapshotAsync();
-            if (!doc.Exists) return NotFound(new { error = "Meetup not found." });
-            var meetup = doc.ConvertTo<Meetup>();
-
-            var parts = await _db.Collection("meetups").Document(id).Collection("participants").GetSnapshotAsync();
-            var participants = parts.Documents.Select(d => d.ConvertTo<MeetupParticipant>()).OrderBy(p => p.Name).ToList();
+            var meetup = await _ctx.Meetups.Find(m => m.Id == id).FirstOrDefaultAsync();
+            if (meetup == null) return NotFound(ApiErrors.NotFound("Meetup not found."));
+            var parts = await _ctx.MeetupParticipants.Find(p => p.MeetupId == id).SortBy(p => p.Name).ToListAsync();
             return Ok(new MeetupDetailDto
             {
-                Meetup = meetup,
-                Participants = participants,
+                Meetup = meetup, Participants = parts,
                 IsCreator = meetup.CreatorUserId == uid,
-                MyRSVPStatus = participants.FirstOrDefault(p => p.UserId == uid)?.Status ?? ""
+                MyRSVPStatus = parts.FirstOrDefault(p => p.UserId == uid)?.Status ?? "",
             });
         }
 
@@ -78,61 +80,51 @@ namespace MeetAgain.Server.Controllers
         {
             var uid = await CallerUidAsync(null, req.UserId);
             if (uid == null) return NeedAuth();
-            if (string.IsNullOrWhiteSpace(req.Title)) return BadRequest(new { error = "title is required." });
-            if (req.EventDateTime == default) return BadRequest(new { error = "eventDateTime is required (ISO 8601)." });
+            if (!ModelState.IsValid)
+                return BadRequest(ApiErrors.BadRequest("Validation failed.", ModelState));
+            if (string.IsNullOrWhiteSpace(req.Title)) return BadRequest(ApiErrors.BadRequest("title is required."));
+            if (req.EventDateTime == default) return BadRequest(ApiErrors.BadRequest("eventDateTime is required (ISO 8601)."));
 
-            var userDoc = await _db.Collection("users").Document(uid).GetSnapshotAsync();
-            if (!userDoc.Exists) return NotFound(new { error = "Caller user document not found." });
-            var ud = userDoc.ToDictionary();
-            var creatorName = ud.TryGetValue("DisplayName", out var n) ? n?.ToString() ?? "" : "";
-            var creatorEmail = ud.TryGetValue("Email", out var e) ? e?.ToString() ?? "" : "";
+            var me = await _ctx.Users.Find(u => u.Uid == uid).FirstOrDefaultAsync();
+            if (me == null) return NotFound(ApiErrors.NotFound("Caller user document not found."));
 
             var meetupId = Guid.NewGuid().ToString("N");
             var meetup = new Meetup
             {
-                Id = meetupId, Title = req.Title, Description = req.Description,
-                CreatorUserId = uid, CreatorName = creatorName, Location = req.Location ?? "",
+                Id = meetupId, Title = req.Title.Trim(), Description = req.Description ?? "",
+                CreatorUserId = uid, CreatorName = me.DisplayName, Location = req.Location ?? "",
                 EventDateTime = DateTime.SpecifyKind(req.EventDateTime, DateTimeKind.Utc),
                 CreatedAt = DateTime.UtcNow, Status = "confirmed",
-                ParticipantCount = (req.InvitedFriendIds?.Count ?? 0) + 1
+                ParticipantCount = (req.InvitedFriendIds?.Count ?? 0) + 1,
             };
-            await _db.Collection("meetups").Document(meetupId).SetAsync(meetup);
-            await _db.Collection("meetups").Document(meetupId).Collection("participants").Document(uid)
-                .SetAsync(new MeetupParticipant
-                {
-                    UserId = uid, Name = creatorName, Email = creatorEmail,
-                    Status = "accepted", InvitedAt = DateTime.UtcNow.ToString("o"), RespondedAt = DateTime.UtcNow.ToString("o")
-                });
+            await _ctx.Meetups.InsertOneAsync(meetup);
+            await _ctx.MeetupParticipants.InsertOneAsync(new MeetupParticipant
+            {
+                Id = $"{meetupId}:{uid}", MeetupId = meetupId, UserId = uid,
+                Name = me.DisplayName, Email = me.Email, Status = "accepted",
+                InvitedAt = DateTime.UtcNow.ToString("o"), RespondedAt = DateTime.UtcNow.ToString("o"),
+            });
 
             if (req.InvitedFriendIds is { Count: > 0 })
             {
-                var batch = _db.StartBatch();
                 foreach (var fid in req.InvitedFriendIds.Distinct())
                 {
-                    if ((await _db.Collection("meetups").Document(meetupId).Collection("participants").Document(fid).GetSnapshotAsync()).Exists)
-                        continue;
-                    var fdoc = await _db.Collection("users").Document(fid).GetSnapshotAsync();
-                    if (!fdoc.Exists) continue;
-                    var fd = fdoc.ToDictionary();
-                    batch.Set(_db.Collection("meetups").Document(meetupId).Collection("participants").Document(fid),
-                        new MeetupParticipant
-                        {
-                            UserId = fid,
-                            Name = fd.TryGetValue("DisplayName", out var fn) ? fn?.ToString() ?? "" : "",
-                            Email = fd.TryGetValue("Email", out var fe) ? fe?.ToString() ?? "" : "",
-                            Status = "invited", InvitedAt = DateTime.UtcNow.ToString("o"), RespondedAt = ""
-                        });
-                    var notifId = Guid.NewGuid().ToString();
-                    batch.Set(_db.Collection("users").Document(fid).Collection("notifications").Document(notifId),
-                        new Dictionary<string, object>
-                        {
-                            { "Id", notifId }, { "Type", "meetup_invite" },
-                            { "Message", $"{creatorName} invited you to '{req.Title}'" },
-                            { "MeetupId", meetupId }, { "CreatedAt", DateTime.UtcNow.ToString("o") },
-                            { "IsRead", false }, { "FriendRequestId", "" }, { "GroupId", "" }
-                        });
+                    if (await _ctx.MeetupParticipants.Find(p => p.Id == $"{meetupId}:{fid}").AnyAsync()) continue;
+                    var f = await _ctx.Users.Find(u => u.Uid == fid).FirstOrDefaultAsync();
+                    if (f == null) continue;
+                    await _ctx.MeetupParticipants.InsertOneAsync(new MeetupParticipant
+                    {
+                        Id = $"{meetupId}:{fid}", MeetupId = meetupId, UserId = fid,
+                        Name = f.DisplayName, Email = f.Email, Status = "invited",
+                        InvitedAt = DateTime.UtcNow.ToString("o"), RespondedAt = "",
+                    });
+                    await _ctx.Notifications.InsertOneAsync(new Notification
+                    {
+                        Id = Guid.NewGuid().ToString(), UserId = fid, Type = "meetup_invite",
+                        Message = $"{me.DisplayName} invited you to '{req.Title}'",
+                        MeetupId = meetupId, CreatedAt = DateTime.UtcNow.ToString("o"), IsRead = false,
+                    });
                 }
-                await batch.CommitAsync();
             }
 
             return CreatedAtAction(nameof(GetDetail), new { id = meetupId }, meetup);
@@ -145,38 +137,26 @@ namespace MeetAgain.Server.Controllers
             var uid = await CallerUidAsync(null, req.UserId);
             if (uid == null) return NeedAuth();
 
-            var doc = await _db.Collection("meetups").Document(id).GetSnapshotAsync();
-            if (!doc.Exists) return NotFound(new { error = "Meetup not found." });
-            var meetup = doc.ConvertTo<Meetup>();
+            var meetup = await _ctx.Meetups.Find(m => m.Id == id).FirstOrDefaultAsync();
+            if (meetup == null) return NotFound(ApiErrors.NotFound("Meetup not found."));
             if (meetup.CreatorUserId != uid) return Forbid();
 
-            if (!string.IsNullOrWhiteSpace(req.Title)) meetup.Title = req.Title;
+            if (!string.IsNullOrWhiteSpace(req.Title)) meetup.Title = req.Title.Trim();
             if (req.Description != null) meetup.Description = req.Description;
             if (req.EventDateTime != default) meetup.EventDateTime = DateTime.SpecifyKind(req.EventDateTime, DateTimeKind.Utc);
             if (req.Location != null) meetup.Location = req.Location;
             if (!string.IsNullOrWhiteSpace(req.Status)) meetup.Status = req.Status;
 
-            await _db.Collection("meetups").Document(id).SetAsync(meetup);
-
-            var parts = await _db.Collection("meetups").Document(id).Collection("participants").GetSnapshotAsync();
-            var batch = _db.StartBatch();
-            foreach (var p in parts.Documents)
-            {
-                var participant = p.ConvertTo<MeetupParticipant>();
-                if (participant.UserId != uid && (participant.Status == "accepted" || participant.Status == "invited"))
+            await _ctx.Meetups.ReplaceOneAsync(m => m.Id == id, meetup);
+            var parts = await _ctx.MeetupParticipants
+                .Find(p => p.MeetupId == id && p.UserId != uid && (p.Status == "accepted" || p.Status == "invited")).ToListAsync();
+            foreach (var p in parts)
+                await _ctx.Notifications.InsertOneAsync(new Notification
                 {
-                    var notifId = Guid.NewGuid().ToString();
-                    batch.Set(_db.Collection("users").Document(participant.UserId).Collection("notifications").Document(notifId),
-                        new Dictionary<string, object>
-                        {
-                            { "Id", notifId }, { "Type", "meetup_update" },
-                            { "Message", $"'{meetup.Title}' has been updated" },
-                            { "MeetupId", id }, { "CreatedAt", DateTime.UtcNow.ToString("o") },
-                            { "IsRead", false }, { "FriendRequestId", "" }, { "GroupId", "" }
-                        });
-                }
-            }
-            await batch.CommitAsync();
+                    Id = Guid.NewGuid().ToString(), UserId = p.UserId, Type = "meetup_update",
+                    Message = $"'{meetup.Title}' has been updated", MeetupId = id,
+                    CreatedAt = DateTime.UtcNow.ToString("o"), IsRead = false,
+                });
             return Ok(meetup);
         }
 
@@ -187,32 +167,20 @@ namespace MeetAgain.Server.Controllers
             var uid = await CallerUidAsync(userId);
             if (uid == null) return NeedAuth();
 
-            var doc = await _db.Collection("meetups").Document(id).GetSnapshotAsync();
-            if (!doc.Exists) return NotFound(new { error = "Meetup not found." });
-            var meetup = doc.ConvertTo<Meetup>();
+            var meetup = await _ctx.Meetups.Find(m => m.Id == id).FirstOrDefaultAsync();
+            if (meetup == null) return NotFound(ApiErrors.NotFound("Meetup not found."));
             if (meetup.CreatorUserId != uid) return Forbid();
 
-            var parts = await _db.Collection("meetups").Document(id).Collection("participants").GetSnapshotAsync();
-            var batch = _db.StartBatch();
-            foreach (var p in parts.Documents)
-            {
-                var participant = p.ConvertTo<MeetupParticipant>();
-                if (participant.UserId != uid)
+            var parts = await _ctx.MeetupParticipants.Find(p => p.MeetupId == id).ToListAsync();
+            foreach (var p in parts.Where(p => p.UserId != uid))
+                await _ctx.Notifications.InsertOneAsync(new Notification
                 {
-                    var notifId = Guid.NewGuid().ToString();
-                    batch.Set(_db.Collection("users").Document(participant.UserId).Collection("notifications").Document(notifId),
-                        new Dictionary<string, object>
-                        {
-                            { "Id", notifId }, { "Type", "meetup_update" },
-                            { "Message", $"'{meetup.Title}' has been cancelled" },
-                            { "MeetupId", id }, { "CreatedAt", DateTime.UtcNow.ToString("o") },
-                            { "IsRead", false }, { "FriendRequestId", "" }, { "GroupId", "" }
-                        });
-                }
-                batch.Delete(p.Reference);
-            }
-            batch.Delete(_db.Collection("meetups").Document(id));
-            await batch.CommitAsync();
+                    Id = Guid.NewGuid().ToString(), UserId = p.UserId, Type = "meetup_update",
+                    Message = $"'{meetup.Title}' has been cancelled", MeetupId = id,
+                    CreatedAt = DateTime.UtcNow.ToString("o"), IsRead = false,
+                });
+            await _ctx.MeetupParticipants.DeleteManyAsync(p => p.MeetupId == id);
+            await _ctx.Meetups.DeleteOneAsync(m => m.Id == id);
             return Ok(new { message = "Meetup deleted." });
         }
 
@@ -223,35 +191,24 @@ namespace MeetAgain.Server.Controllers
             var uid = await CallerUidAsync(null, req.UserId);
             if (uid == null) return NeedAuth();
             var allowed = new[] { "accepted", "declined", "maybe", "invited" };
-            if (!allowed.Contains(req.Status)) return BadRequest(new { error = "status must be one of: accepted, declined, maybe." });
+            if (!allowed.Contains(req.Status)) return BadRequest(ApiErrors.BadRequest("status must be one of: accepted, declined, maybe."));
 
-            var pref = _db.Collection("meetups").Document(id).Collection("participants").Document(uid);
-            var pdoc = await pref.GetSnapshotAsync();
-            if (!pdoc.Exists) return NotFound(new { error = "You are not a participant of this meetup." });
+            var part = await _ctx.MeetupParticipants.Find(p => p.Id == $"{id}:{uid}").FirstOrDefaultAsync();
+            if (part == null) return NotFound(ApiErrors.NotFound("You are not a participant of this meetup."));
 
-            await pref.UpdateAsync(new Dictionary<string, object>
+            await _ctx.MeetupParticipants.UpdateOneAsync(p => p.Id == part.Id,
+                Builders<MeetupParticipant>.Update.Set(p => p.Status, req.Status).Set(p => p.RespondedAt, DateTime.UtcNow.ToString("o")));
+
+            var meetup = await _ctx.Meetups.Find(m => m.Id == id).FirstOrDefaultAsync();
+            if (meetup != null && meetup.CreatorUserId != uid)
             {
-                { "Status", req.Status }, { "RespondedAt", DateTime.UtcNow.ToString("o") }
-            });
-
-            var mdoc = await _db.Collection("meetups").Document(id).GetSnapshotAsync();
-            if (mdoc.Exists)
-            {
-                var meetup = mdoc.ConvertTo<Meetup>();
-                var userName = pdoc.ToDictionary().TryGetValue("Name", out var nm) ? nm?.ToString() ?? "" : "";
-                if (meetup.CreatorUserId != uid)
+                var statusText = req.Status switch { "accepted" => "accepted", "declined" => "declined", "maybe" => "responded 'maybe' to", _ => "responded to" };
+                await _ctx.Notifications.InsertOneAsync(new Notification
                 {
-                    var statusText = req.Status switch { "accepted" => "accepted", "declined" => "declined", "maybe" => "responded 'maybe' to", _ => "responded to" };
-                    var notifId = Guid.NewGuid().ToString();
-                    await _db.Collection("users").Document(meetup.CreatorUserId).Collection("notifications").Document(notifId)
-                        .SetAsync(new Dictionary<string, object>
-                        {
-                            { "Id", notifId }, { "Type", "rsvp_change" },
-                            { "Message", $"{userName} {statusText} your meetup '{meetup.Title}'" },
-                            { "MeetupId", id }, { "CreatedAt", DateTime.UtcNow.ToString("o") },
-                            { "IsRead", false }, { "FriendRequestId", "" }, { "GroupId", "" }
-                        });
-                }
+                    Id = Guid.NewGuid().ToString(), UserId = meetup.CreatorUserId, Type = "rsvp_change",
+                    Message = $"{part.Name} {statusText} your meetup '{meetup.Title}'", MeetupId = id,
+                    CreatedAt = DateTime.UtcNow.ToString("o"), IsRead = false,
+                });
             }
             return Ok(new { message = $"RSVP set to {req.Status}." });
         }

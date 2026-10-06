@@ -1,14 +1,26 @@
-using Google.Cloud.Firestore;
+using MongoDB.Bson;
+using MongoDB.Bson.Serialization.Attributes;
 
 namespace MeetAgain.Server.Models
 {
-    [FirestoreData]
     public class AppUser
     {
-        [FirestoreProperty] public string Uid { get; set; } = "";
-        [FirestoreProperty] public string Email { get; set; } = "";
-        [FirestoreProperty] public string DisplayName { get; set; } = "";
-        [FirestoreProperty] public string CreatedAt { get; set; } = "";
+        [BsonId]
+        [BsonRepresentation(BsonType.String)]
+        public string Uid { get; set; } = "";
+
+        [BsonElement("email")]
+        public string Email { get; set; } = "";
+
+        [BsonElement("displayName")]
+        public string DisplayName { get; set; } = "";
+
+        [BsonElement("createdAt")]
+        public string CreatedAt { get; set; } = "";
+
+        /// <summary>BCrypt password hash. Never serialized to API responses.</summary>
+        [BsonElement("passwordHash")]
+        public string PasswordHash { get; set; } = "";
 
         public AppUser() { }
 

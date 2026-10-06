@@ -1,29 +1,44 @@
-using Google.Cloud.Firestore;
 using MeetAgain.Server.Models;
 using MeetAgain.Server.Services;
+using MeetAgain.Server.Services.Mongo;
 using Microsoft.AspNetCore.Mvc;
+using MongoDB.Driver;
 
 namespace MeetAgain.Server.Controllers
 {
     [ApiController]
     [Route("api/users")]
+    [Route("api/v1/users")]
     public class UsersController : ControllerBase
     {
-        private readonly FirestoreDb _db;
-        private readonly FirestoreService _fs;
+        private readonly MongoDbContext _ctx;
+        private readonly MongoService _db;
 
-        public UsersController(FirestoreDb db, FirestoreService fs)
+        public UsersController(MongoDbContext ctx, MongoService db)
         {
+            _ctx = ctx;
             _db = db;
-            _fs = fs;
         }
 
-        // GET /api/users
+        // GET /api/users?page=&pageSize= (paginated when params present, else legacy array)
         [HttpGet]
-        public async Task<IActionResult> GetAll()
+        public async Task<IActionResult> GetAll([FromQuery] int? page, [FromQuery] int? pageSize)
         {
-            var users = await _fs.GetAllUsersAsync();
-            return Ok(users);
+            if (page.HasValue || pageSize.HasValue)
+            {
+                var p = page.GetValueOrDefault(1);
+                var ps = Math.Clamp(pageSize.GetValueOrDefault(20), 1, 100);
+                var users = await _db.GetAllUsersAsync(p, ps);
+                var total = await _db.CountUsersAsync();
+                return Ok(new PagedResult<object>
+                {
+                    Data = users.Select(Safe).Cast<object>().ToList(),
+                    Page = p, PageSize = ps, Total = total,
+                });
+            }
+
+            var all = await _db.GetAllUsersAsync(1, 100);
+            return Ok(all.Select(Safe).ToList());
         }
 
         // GET /api/users/search?email=a@b.com&userId=<callerUid>
@@ -31,42 +46,40 @@ namespace MeetAgain.Server.Controllers
         public async Task<IActionResult> Search([FromQuery] string email, [FromQuery] string? userId)
         {
             if (string.IsNullOrWhiteSpace(email))
-                return BadRequest(new { error = "email query param is required." });
+                return BadRequest(ApiErrors.BadRequest("email query param is required."));
 
             var (callerId, _) = await ApiUserContext.ResolveAsync(HttpContext, userId);
             if (string.IsNullOrWhiteSpace(callerId))
-                return Unauthorized(new { error = "Missing user identity. Send X-User-Id, Bearer token, or ?userId=." });
+                return Unauthorized(ApiErrors.Unauthorized());
 
-            var snap = await _db.Collection("users").WhereEqualTo("Email", email).Limit(1).GetSnapshotAsync();
-            if (snap.Documents.Count == 0) return NotFound(new { error = "User not found." });
-
-            var doc = snap.Documents[0];
-            var user = doc.ConvertTo<AppUser>();
-            user.Uid = doc.Id;
-            if (user.Uid == callerId) return NotFound(new { error = "User not found." });
-            return Ok(user);
+            var user = await _db.GetUserByEmailAsync(email.Trim().ToLowerInvariant());
+            if (user == null || user.Uid == callerId)
+                return NotFound(ApiErrors.NotFound("User not found."));
+            return Ok(Safe(user));
         }
 
         // GET /api/users/{id}
         [HttpGet("{id}")]
         public async Task<IActionResult> GetById(string id)
         {
-            var user = await _fs.GetUserAsync(id);
-            if (user == null) return NotFound(new { error = "User not found." });
-            return Ok(user);
+            var user = await _db.GetUserAsync(id);
+            if (user == null) return NotFound(ApiErrors.NotFound("User not found."));
+            return Ok(Safe(user));
         }
 
         // PUT /api/users/{id}
         [HttpPut("{id}")]
         public async Task<IActionResult> Upsert(string id, [FromBody] UpdateUserRequest req)
         {
-            var existing = await _fs.GetUserAsync(id);
-            if (existing == null) return NotFound(new { error = "User not found." });
+            var existing = await _db.GetUserAsync(id);
+            if (existing == null) return NotFound(ApiErrors.NotFound("User not found."));
 
-            if (!string.IsNullOrWhiteSpace(req.Email)) existing.Email = req.Email;
-            if (!string.IsNullOrWhiteSpace(req.DisplayName)) existing.DisplayName = req.DisplayName;
-            await _fs.CreateOrUpdateUserAsync(existing);
-            return Ok(existing);
+            if (!string.IsNullOrWhiteSpace(req.Email)) existing.Email = req.Email.Trim().ToLowerInvariant();
+            if (!string.IsNullOrWhiteSpace(req.DisplayName)) existing.DisplayName = req.DisplayName.Trim();
+            await _db.CreateOrUpdateUserAsync(existing);
+            return Ok(Safe(existing));
         }
+
+        private static object Safe(AppUser u) => new { uid = u.Uid, email = u.Email, displayName = u.DisplayName, createdAt = u.CreatedAt };
     }
 }

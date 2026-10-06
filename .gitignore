@@ -1,0 +1,11 @@
+.env
+firebase-adminsdk.json
+**/firebase-adminsdk.json
+bin/
+obj/
+out/
+*.user
+.vs/
+.idea/
+.DS_Store
+migration-report.json

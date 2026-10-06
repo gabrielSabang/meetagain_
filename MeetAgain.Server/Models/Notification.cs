@@ -1,19 +1,22 @@
-using Google.Cloud.Firestore;
+using MongoDB.Bson;
+using MongoDB.Bson.Serialization.Attributes;
 
 namespace MeetAgain.Server.Models
 {
-    [FirestoreData]
     public class Notification
     {
-        [FirestoreProperty] public string Id { get; set; } = "";
-        [FirestoreProperty] public string Type { get; set; } = "";
-        [FirestoreProperty] public string Message { get; set; } = "";
-        [FirestoreProperty] public string CreatedAt { get; set; } = "";
-        [FirestoreProperty] public bool IsRead { get; set; } = false;
-        
+        [BsonId]
+        [BsonRepresentation(BsonType.String)]
+        public string Id { get; set; } = "";
+        [BsonElement("userId")] public string UserId { get; set; } = "";
+        [BsonElement("type")] public string Type { get; set; } = "";
+        [BsonElement("message")] public string Message { get; set; } = "";
+        [BsonElement("createdAt")] public string CreatedAt { get; set; } = "";
+        [BsonElement("isRead")] public bool IsRead { get; set; } = false;
+
         // Optional metadata fields
-        [FirestoreProperty] public string MeetupId { get; set; } = "";
-        [FirestoreProperty] public string FriendRequestId { get; set; } = "";
-        [FirestoreProperty] public string GroupId { get; set; } = "";
+        [BsonElement("meetupId")] public string MeetupId { get; set; } = "";
+        [BsonElement("friendRequestId")] public string FriendRequestId { get; set; } = "";
+        [BsonElement("groupId")] public string GroupId { get; set; } = "";
     }
 }

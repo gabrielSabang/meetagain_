@@ -1,17 +1,18 @@
 @page "/diagnostic"
+@using MongoDB.Driver
 @inject FriendService FriendService
 @inject MeetupService MeetupService
 @inject AuthService AuthService
-@inject Google.Cloud.Firestore.FirestoreDb FirestoreDb
+@inject MeetAgain.Server.Services.Mongo.MongoDbContext Mongo
 
-<PageTitle>Firestore Diagnostic</PageTitle>
+<PageTitle>MongoDB Diagnostic</PageTitle>
 
 <div class="container mt-4">
     <div class="card fade-in">
         <div class="card-header">
-            <h2 class="card-title">🔍 Firestore Connection Diagnostic</h2>
+            <h2 class="card-title">🔍 MongoDB Connection Diagnostic</h2>
             <p style="color: var(--gray-600); margin: 0.5rem 0 0 0; font-size: 0.875rem;">
-                This tool checks if your data is persisting correctly to Firestore
+                This tool checks if your data is persisting correctly to MongoDB
             </p>
         </div>
         <div class="card-body">
@@ -45,7 +46,7 @@
                 @if (friendsData.Count > 0)
                 {
                     <div style="margin-top: 2rem;">
-                        <h3 style="margin-bottom: 1rem;">👥 Friends Data in Firestore:</h3>
+                        <h3 style="margin-bottom: 1rem;">👥 Friends Data in MongoDB:</h3>
                         <div style="background: var(--gray-50); padding: 1rem; border-radius: var(--radius); font-family: monospace; font-size: 0.875rem; max-height: 300px; overflow-y: auto;">
                             @foreach (var friend in friendsData)
                             {
@@ -62,7 +63,7 @@
                 @if (meetupsData.Count > 0)
                 {
                     <div style="margin-top: 2rem;">
-                        <h3 style="margin-bottom: 1rem;">📅 Meetups Data in Firestore:</h3>
+                        <h3 style="margin-bottom: 1rem;">📅 Meetups Data in MongoDB:</h3>
                         <div style="background: var(--gray-50); padding: 1rem; border-radius: var(--radius); font-family: monospace; font-size: 0.875rem; max-height: 300px; overflow-y: auto;">
                             @foreach (var meetup in meetupsData)
                             {
@@ -79,9 +80,9 @@
                 <div style="margin-top: 2rem; padding: 1rem; background: var(--gray-50); border-radius: var(--radius);">
                     <h4 style="margin-bottom: 0.5rem;">💡 Tips:</h4>
                     <ul style="margin: 0; padding-left: 1.5rem; color: var(--gray-700);">
-                        <li>If write permissions fail, check your Firestore Security Rules</li>
+                        <li>Check <code>GET /health</code> for collection counts</li>
                         <li>If friends show 0 but you added some, they might not be persisting</li>
-                        <li>Check the Firebase Console → Firestore Database to verify data</li>
+                        <li>Check MongoDB Atlas → Database → Collections to verify data</li>
                         <li>Make sure you're using the same user account when testing</li>
                     </ul>
                 </div>
@@ -112,250 +113,80 @@
 
         try
         {
-            // Test 1: Check if user is authenticated
             var userId = AuthService.UserId;
             if (string.IsNullOrEmpty(userId))
             {
-                results.Add(new DiagnosticResult
-                {
-                    Test = "Authentication",
-                    Message = "Not authenticated. Please log in first.",
-                    Status = "error"
-                });
+                results.Add(new DiagnosticResult { Test = "Authentication", Message = "Not authenticated. Please log in first.", Status = "error" });
                 return;
             }
+            results.Add(new DiagnosticResult { Test = "Authentication", Message = $"Authenticated as: {userId}", Status = "success" });
 
-            results.Add(new DiagnosticResult
-            {
-                Test = "Authentication",
-                Message = $"Authenticated as: {userId}",
-                Status = "success"
-            });
-
-            // Test 2: Check Firestore connection
             try
             {
-                var userDoc = await FirestoreDb.Collection("users").Document(userId).GetSnapshotAsync();
-                if (userDoc.Exists)
-                {
-                    results.Add(new DiagnosticResult
-                    {
-                        Test = "Firestore Connection",
-                        Message = "Connected to Firestore successfully",
-                        Status = "success"
-                    });
+                await Mongo.Database.RunCommandAsync<MongoDB.Bson.BsonDocument>(new MongoDB.Bson.BsonDocument("ping", 1));
+                results.Add(new DiagnosticResult { Test = "MongoDB Connection", Message = $"Connected to '{Mongo.DatabaseName}' (fallback: {Mongo.UsedFallback})", Status = "success" });
 
-                    var userData = userDoc.ToDictionary();
-                    var userName = userData.ContainsKey("DisplayName") ? userData["DisplayName"]?.ToString() : "Unknown";
-                    results.Add(new DiagnosticResult
-                    {
-                        Test = "User Document",
-                        Message = $"User document exists for: {userName}",
-                        Status = "success"
-                    });
-                }
-                else
-                {
-                    results.Add(new DiagnosticResult
-                    {
-                        Test = "User Document",
-                        Message = "User document does not exist in Firestore. This might cause issues.",
-                        Status = "error"
-                    });
-                }
-            }
-            catch (Exception ex)
-            {
+                var user = await Mongo.Users.Find(u => u.Uid == userId).FirstOrDefaultAsync();
                 results.Add(new DiagnosticResult
                 {
-                    Test = "Firestore Connection",
-                    Message = $"Error connecting: {ex.Message}",
-                    Status = "error"
-                });
-            }
-
-            // Test 3: Check friends collection
-            try
-            {
-                var friendsSnapshot = await FirestoreDb.Collection("users")
-                    .Document(userId)
-                    .Collection("friends")
-                    .GetSnapshotAsync();
-
-                results.Add(new DiagnosticResult
-                {
-                    Test = "Friends Collection",
-                    Message = $"Found {friendsSnapshot.Count} friend document(s) in Firestore",
-                    Status = friendsSnapshot.Count > 0 ? "success" : "info"
-                });
-
-                // List all friends
-                foreach (var doc in friendsSnapshot.Documents)
-                {
-                    var friendData = doc.ToDictionary();
-                    var name = friendData.ContainsKey("Name") ? friendData["Name"]?.ToString() : "Unknown";
-                    var email = friendData.ContainsKey("Email") ? friendData["Email"]?.ToString() : "Unknown";
-                    var addedAt = friendData.ContainsKey("AddedAt") ? friendData["AddedAt"]?.ToString() : "Unknown";
-                    friendsData.Add($"Friend: {name}", $"Email: {email}, Added: {addedAt}");
-                }
-            }
-            catch (Exception ex)
-            {
-                results.Add(new DiagnosticResult
-                {
-                    Test = "Friends Collection",
-                    Message = $"Error reading friends: {ex.Message}",
-                    Status = "error"
-                });
-            }
-
-            // Test 4: Check friend requests
-            try
-            {
-                var requestsSnapshot = await FirestoreDb.Collection("users")
-                    .Document(userId)
-                    .Collection("friendRequests")
-                    .GetSnapshotAsync();
-
-                results.Add(new DiagnosticResult
-                {
-                    Test = "Friend Requests",
-                    Message = $"Found {requestsSnapshot.Count} pending friend request(s)",
-                    Status = "info"
+                    Test = "User Document",
+                    Message = user != null ? $"User document exists for: {user.DisplayName}" : "User document does not exist in MongoDB.",
+                    Status = user != null ? "success" : "error",
                 });
             }
             catch (Exception ex)
             {
-                results.Add(new DiagnosticResult
-                {
-                    Test = "Friend Requests",
-                    Message = $"Error: {ex.Message}",
-                    Status = "error"
-                });
+                results.Add(new DiagnosticResult { Test = "MongoDB Connection", Message = $"Error connecting: {ex.Message}", Status = "error" });
             }
 
-            // Test 5: Check meetups collection
-            try
-            {
-                var meetupsSnapshot = await FirestoreDb.Collection("meetups").GetSnapshotAsync();
-
-                results.Add(new DiagnosticResult
-                {
-                    Test = "Meetups Collection",
-                    Message = $"Found {meetupsSnapshot.Count} total meetup(s) in database",
-                    Status = meetupsSnapshot.Count > 0 ? "success" : "info"
-                });
-
-                // List meetups where user is participant
-                int myMeetupsCount = 0;
-                foreach (var meetupDoc in meetupsSnapshot.Documents)
-                {
-                    var participantDoc = await FirestoreDb.Collection("meetups")
-                        .Document(meetupDoc.Id)
-                        .Collection("participants")
-                        .Document(userId)
-                        .GetSnapshotAsync();
-
-                    if (participantDoc.Exists)
-                    {
-                        myMeetupsCount++;
-                        var meetup = meetupDoc.ConvertTo<Meetup>();
-                        var participant = participantDoc.ConvertTo<MeetupParticipant>();
-                        meetupsData.Add($"Meetup: {meetup.Title}", 
-                            $"Creator: {meetup.CreatorName}, Status: {participant.Status}, Participants: {meetup.ParticipantCount}");
-                    }
-                }
-
-                results.Add(new DiagnosticResult
-                {
-                    Test = "My Meetups",
-                    Message = $"You are participating in {myMeetupsCount} meetup(s)",
-                    Status = myMeetupsCount > 0 ? "success" : "info"
-                });
-            }
-            catch (Exception ex)
-            {
-                results.Add(new DiagnosticResult
-                {
-                    Test = "Meetups Collection",
-                    Message = $"Error: {ex.Message}",
-                    Status = "error"
-                });
-            }
-
-            // Test 6: Try FriendService
             try
             {
                 var friends = await FriendService.GetFriendsAsync();
-                results.Add(new DiagnosticResult
-                {
-                    Test = "FriendService",
-                    Message = $"Service returned {friends.Count} friend(s)",
-                    Status = "success"
-                });
+                results.Add(new DiagnosticResult { Test = "Friends Collection", Message = $"Found {friends.Count} friend(s) in MongoDB", Status = friends.Count > 0 ? "success" : "info" });
+                foreach (var f in friends)
+                    friendsData.TryAdd($"Friend: {f.Name}", $"Email: {f.Email}, Added: {f.AddedAt}");
             }
             catch (Exception ex)
             {
-                results.Add(new DiagnosticResult
-                {
-                    Test = "FriendService",
-                    Message = $"Error: {ex.Message}",
-                    Status = "error"
-                });
+                results.Add(new DiagnosticResult { Test = "Friends Collection", Message = $"Error reading friends: {ex.Message}", Status = "error" });
             }
 
-            // Test 7: Try MeetupService
+            try
+            {
+                var requests = await FriendService.GetFriendRequestsAsync();
+                results.Add(new DiagnosticResult { Test = "Friend Requests", Message = $"Found {requests.Count} pending friend request(s)", Status = "info" });
+            }
+            catch (Exception ex)
+            {
+                results.Add(new DiagnosticResult { Test = "Friend Requests", Message = $"Error: {ex.Message}", Status = "error" });
+            }
+
             try
             {
                 var meetups = await MeetupService.GetMyMeetupsAsync();
-                results.Add(new DiagnosticResult
-                {
-                    Test = "MeetupService",
-                    Message = $"Service returned {meetups.Count} meetup(s)",
-                    Status = "success"
-                });
+                results.Add(new DiagnosticResult { Test = "My Meetups", Message = $"You are participating in {meetups.Count} meetup(s)", Status = meetups.Count > 0 ? "success" : "info" });
+                foreach (var m in meetups)
+                    meetupsData.TryAdd($"Meetup: {m.Title}", $"Creator: {m.CreatorName}, Status: {m.MyRSVPStatus}, Participants: {m.ParticipantCount}");
             }
             catch (Exception ex)
             {
-                results.Add(new DiagnosticResult
-                {
-                    Test = "MeetupService",
-                    Message = $"Error: {ex.Message}",
-                    Status = "error"
-                });
+                results.Add(new DiagnosticResult { Test = "Meetups Collection", Message = $"Error: {ex.Message}", Status = "error" });
             }
 
-            // Test 8: Check write permissions
             try
             {
-                var testDocRef = FirestoreDb.Collection("users")
-                    .Document(userId)
-                    .Collection("_test")
-                    .Document("diagnostic");
-
-                await testDocRef.SetAsync(new Dictionary<string, object>
+                var id = $"diag:{Guid.NewGuid():N}";
+                await Mongo.Notifications.InsertOneAsync(new MeetAgain.Server.Models.Notification
                 {
-                    { "timestamp", DateTime.UtcNow.ToString("o") },
-                    { "test", "write permission check" }
+                    Id = id, UserId = userId, Type = "diagnostic", Message = "write permission check",
+                    CreatedAt = DateTime.UtcNow.ToString("o"), IsRead = true,
                 });
-
-                await testDocRef.DeleteAsync();
-
-                results.Add(new DiagnosticResult
-                {
-                    Test = "Write Permissions",
-                    Message = "Can write to Firestore successfully",
-                    Status = "success"
-                });
+                await Mongo.Notifications.DeleteOneAsync(n => n.Id == id);
+                results.Add(new DiagnosticResult { Test = "Write Permissions", Message = "Can write to MongoDB successfully", Status = "success" });
             }
             catch (Exception ex)
             {
-                results.Add(new DiagnosticResult
-                {
-                    Test = "Write Permissions",
-                    Message = $"Cannot write: {ex.Message}. Check your Firestore Security Rules!",
-                    Status = "error"
-                });
+                results.Add(new DiagnosticResult { Test = "Write Permissions", Message = $"Cannot write: {ex.Message}", Status = "error" });
             }
         }
         finally
@@ -376,21 +207,7 @@
 }
 
 <style>
-    .alert-success {
-        background: #D1FAE5;
-        border-left: 4px solid var(--success);
-        color: #065F46;
-    }
-
-    .alert-error {
-        background: #FEE2E2;
-        border-left: 4px solid var(--danger);
-        color: #991B1B;
-    }
-
-    .alert-info {
-        background: #DBEAFE;
-        border-left: 4px solid #3B82F6;
-        color: #1E40AF;
-    }
+    .alert-success { background: #D1FAE5; border-left: 4px solid var(--success); color: #065F46; }
+    .alert-error { background: #FEE2E2; border-left: 4px solid var(--danger); color: #991B1B; }
+    .alert-info { background: #DBEAFE; border-left: 4px solid #3B82F6; color: #1E40AF; }
 </style>

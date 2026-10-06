@@ -1,14 +1,18 @@
-using MeetAgain.Server.Models;
-using Google.Cloud.Firestore;
+using MongoDB.Bson;
+using MongoDB.Bson.Serialization.Attributes;
 
 namespace MeetAgain.Server.Models
 {
-    [FirestoreData]
+    /// <summary>Stored in friends collection. Id = $"{UserId}:{FriendId}".</summary>
     public class Friend
     {
-        [FirestoreProperty] public string Id { get; set; } = "";     
-        [FirestoreProperty] public string Name { get; set; } = "";
-        [FirestoreProperty] public string Email { get; set; } = "";
-        [FirestoreProperty] public string AddedAt { get; set; } = "";
+        [BsonId]
+        [BsonRepresentation(BsonType.String)]
+        public string Id { get; set; } = "";
+        [BsonElement("userId")] public string UserId { get; set; } = "";
+        [BsonElement("friendId")] public string FriendId { get; set; } = "";
+        [BsonElement("name")] public string Name { get; set; } = "";
+        [BsonElement("email")] public string Email { get; set; } = "";
+        [BsonElement("addedAt")] public string AddedAt { get; set; } = "";
     }
 }

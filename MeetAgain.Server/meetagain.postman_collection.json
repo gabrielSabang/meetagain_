@@ -1,0 +1,152 @@
+{
+  "info": {
+    "name": "MeetAgain API (MongoDB)",
+    "_postman_id": "meetagain-mongo-v1",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "base", "value": "http://localhost:5082" },
+    { "key": "token", "value": "YOUR_JWT_HERE" },
+    { "key": "userId", "value": "YOUR_USER_ID_HERE" },
+    { "key": "meetupId", "value": "YOUR_MEETUP_ID_HERE" },
+    { "key": "groupId", "value": "YOUR_GROUP_ID_HERE" },
+    { "key": "notifId", "value": "YOUR_NOTIFICATION_ID_HERE" }
+  ],
+  "item": [
+    {
+      "name": "Health",
+      "item": [
+        { "name": "GET /health", "request": { "method": "GET", "url": "{{base}}/health" } },
+        { "name": "GET /api/v1/health", "request": { "method": "GET", "url": "{{base}}/api/v1/health" } }
+      ]
+    },
+    {
+      "name": "Auth",
+      "item": [
+        {
+          "name": "POST signup",
+          "request": {
+            "method": "POST", "url": "{{base}}/api/v1/auth/signup",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\"email\":\"test@example.com\",\"password\":\"Password123!\",\"displayName\":\"Test User\"}" }
+          }
+        },
+        {
+          "name": "POST login",
+          "request": {
+            "method": "POST", "url": "{{base}}/api/v1/auth/login",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\"email\":\"test@example.com\",\"password\":\"Password123!\"}" }
+          }
+        },
+        {
+          "name": "GET me",
+          "request": {
+            "method": "GET", "url": "{{base}}/api/v1/auth/me",
+            "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Users",
+      "item": [
+        { "name": "GET list", "request": { "method": "GET", "url": "{{base}}/api/v1/users?page=1&pageSize=20", "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }] } },
+        { "name": "GET search", "request": { "method": "GET", "url": "{{base}}/api/v1/users/search?email=friend@example.com&userId={{userId}}", "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }] } },
+        { "name": "GET by id", "request": { "method": "GET", "url": "{{base}}/api/v1/users/{{userId}}", "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }] } },
+        {
+          "name": "PUT update",
+          "request": {
+            "method": "PUT", "url": "{{base}}/api/v1/users/{{userId}}",
+            "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }, { "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\"displayName\":\"Updated Name\"}" }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Meetups",
+      "item": [
+        { "name": "GET mine", "request": { "method": "GET", "url": "{{base}}/api/v1/meetups?userId={{userId}}", "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }] } },
+        {
+          "name": "POST create",
+          "request": {
+            "method": "POST", "url": "{{base}}/api/v1/meetups",
+            "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }, { "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\"userId\":\"{{userId}}\",\"title\":\"Weekend Hike\",\"description\":\"Morning hike\",\"eventDateTime\":\"2026-10-05T09:00:00Z\",\"location\":\"Trailhead\",\"invitedFriendIds\":[]}" }
+          }
+        },
+        { "name": "GET detail", "request": { "method": "GET", "url": "{{base}}/api/v1/meetups/{{meetupId}}?userId={{userId}}", "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }] } },
+        {
+          "name": "POST rsvp",
+          "request": {
+            "method": "POST", "url": "{{base}}/api/v1/meetups/{{meetupId}}/rsvp",
+            "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }, { "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\"userId\":\"{{userId}}\",\"status\":\"accepted\"}" }
+          }
+        },
+        { "name": "DELETE", "request": { "method": "DELETE", "url": "{{base}}/api/v1/meetups/{{meetupId}}?userId={{userId}}", "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }] } }
+      ]
+    },
+    {
+      "name": "Friends",
+      "item": [
+        { "name": "GET list", "request": { "method": "GET", "url": "{{base}}/api/v1/friends?userId={{userId}}", "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }] } },
+        { "name": "GET requests", "request": { "method": "GET", "url": "{{base}}/api/v1/friends/requests?userId={{userId}}", "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }] } },
+        {
+          "name": "POST send request",
+          "request": {
+            "method": "POST", "url": "{{base}}/api/v1/friends/requests",
+            "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }, { "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\"userId\":\"{{userId}}\",\"recipientEmail\":\"friend@example.com\"}" }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Groups",
+      "item": [
+        { "name": "GET mine", "request": { "method": "GET", "url": "{{base}}/api/v1/groups?userId={{userId}}", "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }] } },
+        {
+          "name": "POST create",
+          "request": {
+            "method": "POST", "url": "{{base}}/api/v1/groups",
+            "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }, { "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\"userId\":\"{{userId}}\",\"name\":\"Hiking Crew\",\"description\":\"Weekend hikes\",\"initialMemberIds\":[]}" }
+          }
+        },
+        { "name": "GET detail", "request": { "method": "GET", "url": "{{base}}/api/v1/groups/{{groupId}}?userId={{userId}}", "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }] } }
+      ]
+    },
+    {
+      "name": "Notifications",
+      "item": [
+        { "name": "GET mine", "request": { "method": "GET", "url": "{{base}}/api/v1/notifications?userId={{userId}}", "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }] } },
+        { "name": "GET unread-count", "request": { "method": "GET", "url": "{{base}}/api/v1/notifications/unread-count?userId={{userId}}", "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }] } },
+        { "name": "POST read-all", "request": { "method": "POST", "url": "{{base}}/api/v1/notifications/read-all?userId={{userId}}", "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }] } }
+      ]
+    },
+    {
+      "name": "Availability",
+      "item": [
+        { "name": "GET", "request": { "method": "GET", "url": "{{base}}/api/v1/availability/{{userId}}", "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }] } },
+        {
+          "name": "PUT save",
+          "request": {
+            "method": "PUT", "url": "{{base}}/api/v1/availability/{{userId}}",
+            "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }, { "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\"preferredDays\":[\"Monday\",\"Wednesday\"],\"availableTimeSlots\":[{\"start\":\"09:00\",\"end\":\"18:00\"}],\"blockedDates\":[]}" }
+          }
+        },
+        {
+          "name": "POST suggest",
+          "request": {
+            "method": "POST", "url": "{{base}}/api/v1/availability/suggest",
+            "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }, { "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\"participantUserIds\":[\"{{userId}}\"],\"startDate\":\"2026-10-01T00:00:00Z\",\"endDate\":\"2026-10-07T00:00:00Z\",\"durationMinutes\":120,\"maxSuggestions\":5}" }
+          }
+        }
+      ]
+    }
+  ]
+}

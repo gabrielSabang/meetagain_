@@ -1,3 +1,0 @@
-﻿<Project>
-  <Import Project="../build/MeetAgain.Server.props" />
-</Project>

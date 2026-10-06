@@ -1,204 +1,108 @@
-using Google.Cloud.Firestore;
 using MeetAgain.Server.Models;
+using MeetAgain.Server.Services.Mongo;
+using MongoDB.Driver;
 
 namespace MeetAgain.Server.Services
 {
     public class NotificationService
     {
-        private readonly FirestoreDb _db;
+        private readonly MongoDbContext _ctx;
         private readonly CurrentUserAccessor _currentUserAccessor;
 
-        public NotificationService(FirestoreDb db, CurrentUserAccessor currentUserAccessor)
+        public NotificationService(MongoDbContext ctx, CurrentUserAccessor currentUserAccessor)
         {
-            _db = db;
+            _ctx = ctx;
             _currentUserAccessor = currentUserAccessor;
         }
 
-        // Create a notification for a user
         public async Task CreateNotificationAsync(string userId, string type, string message, Dictionary<string, object>? metadata = null)
         {
-            var notification = new Notification
+            var n = new Notification
             {
-                Id = Guid.NewGuid().ToString(),
-                Type = type,
-                Message = message,
-                CreatedAt = DateTime.UtcNow.ToString("o"),
-                IsRead = false
+                Id = Guid.NewGuid().ToString(), UserId = userId, Type = type, Message = message,
+                CreatedAt = DateTime.UtcNow.ToString("o"), IsRead = false,
             };
-
-            var docRef = _db.Collection("users").Document(userId)
-                           .Collection("notifications").Document(notification.Id);
-
-            var data = new Dictionary<string, object>
-            {
-                { "Id", notification.Id },
-                { "Type", type },
-                { "Message", message },
-                { "CreatedAt", notification.CreatedAt },
-                { "IsRead", false }
-            };
-
-            // Add metadata if provided (meetupId, friendRequestId, etc.)
             if (metadata != null)
             {
-                foreach (var kvp in metadata)
-                {
-                    data[kvp.Key] = kvp.Value;
-                }
+                if (metadata.TryGetValue("MeetupId", out var mi)) n.MeetupId = mi?.ToString() ?? "";
+                if (metadata.TryGetValue("FriendRequestId", out var fr)) n.FriendRequestId = fr?.ToString() ?? "";
+                if (metadata.TryGetValue("GroupId", out var gr)) n.GroupId = gr?.ToString() ?? "";
             }
-
-            await docRef.SetAsync(data);
+            await _ctx.Notifications.InsertOneAsync(n);
         }
 
-        // Get all notifications for current user
-        public async Task<List<NotificationDto>> GetMyNotificationsAsync()
+        public async Task<List<NotificationDto>> GetMyNotificationsAsync(int page = 1, int pageSize = 50)
         {
             var (userId, _) = await _currentUserAccessor.GetUserAsync();
-            if (string.IsNullOrEmpty(userId)) return new List<NotificationDto>();
-
-            var snapshot = await _db.Collection("users").Document(userId)
-                                   .Collection("notifications")
-                                   .OrderByDescending("CreatedAt")
-                                   .Limit(50)
-                                   .GetSnapshotAsync();
-
-            var notifications = new List<NotificationDto>();
-            foreach (var doc in snapshot.Documents)
-            {
-                var data = doc.ToDictionary();
-                
-                // Use document ID if Id field is not set
-                var notificationId = data.ContainsKey("Id") && !string.IsNullOrEmpty(data["Id"]?.ToString()) 
-                    ? data["Id"].ToString() 
-                    : doc.Id;
-                
-                notifications.Add(new NotificationDto
-                {
-                    Id = notificationId ?? "",
-                    Type = data.ContainsKey("Type") ? data["Type"]?.ToString() ?? "" : "",
-                    Message = data.ContainsKey("Message") ? data["Message"]?.ToString() ?? "" : "",
-                    CreatedAt = data.ContainsKey("CreatedAt") ? data["CreatedAt"]?.ToString() ?? "" : "",
-                    IsRead = data.ContainsKey("IsRead") && (bool)data["IsRead"],
-                    MeetupId = data.ContainsKey("MeetupId") ? data["MeetupId"]?.ToString() : null,
-                    FriendRequestId = data.ContainsKey("FriendRequestId") ? data["FriendRequestId"]?.ToString() : null,
-                    GroupId = data.ContainsKey("GroupId") ? data["GroupId"]?.ToString() : null
-                });
-            }
-
-            return notifications;
+            if (string.IsNullOrEmpty(userId)) return new();
+            var list = await _ctx.Notifications.Find(n => n.UserId == userId)
+                .SortByDescending(n => n.CreatedAt).Skip((page - 1) * pageSize).Limit(pageSize).ToListAsync();
+            return list.Select(ToDto).ToList();
         }
 
-        // Get unread notification count
         public async Task<int> GetUnreadCountAsync()
         {
             var (userId, _) = await _currentUserAccessor.GetUserAsync();
             if (string.IsNullOrEmpty(userId)) return 0;
-
-            var snapshot = await _db.Collection("users").Document(userId)
-                                   .Collection("notifications")
-                                   .WhereEqualTo("IsRead", false)
-                                   .GetSnapshotAsync();
-
-            return snapshot.Count;
+            return (int)await _ctx.Notifications.CountDocumentsAsync(n => n.UserId == userId && !n.IsRead);
         }
 
-        // Mark notification as read
         public async Task MarkAsReadAsync(string notificationId)
         {
             var (userId, _) = await _currentUserAccessor.GetUserAsync();
             if (string.IsNullOrEmpty(userId)) return;
-
-            var docRef = _db.Collection("users").Document(userId)
-                           .Collection("notifications").Document(notificationId);
-
-            await docRef.UpdateAsync("IsRead", true);
+            await _ctx.Notifications.UpdateOneAsync(n => n.Id == notificationId && n.UserId == userId,
+                Builders<Notification>.Update.Set(n => n.IsRead, true));
         }
 
-        // Mark all notifications as read
-        public async Task MarkAllAsReadAsync()
+        public async Task<int> MarkAllAsReadAsync()
         {
             var (userId, _) = await _currentUserAccessor.GetUserAsync();
-            if (string.IsNullOrEmpty(userId)) return;
-
-            var snapshot = await _db.Collection("users").Document(userId)
-                                   .Collection("notifications")
-                                   .WhereEqualTo("IsRead", false)
-                                   .GetSnapshotAsync();
-
-            var batch = _db.StartBatch();
-            foreach (var doc in snapshot.Documents)
-            {
-                batch.Update(doc.Reference, "IsRead", true);
-            }
-
-            await batch.CommitAsync();
+            if (string.IsNullOrEmpty(userId)) return 0;
+            var res = await _ctx.Notifications.UpdateManyAsync(n => n.UserId == userId && !n.IsRead,
+                Builders<Notification>.Update.Set(n => n.IsRead, true));
+            return (int)res.ModifiedCount;
         }
 
-        // Delete a notification
         public async Task DeleteNotificationAsync(string notificationId)
         {
             var (userId, _) = await _currentUserAccessor.GetUserAsync();
             if (string.IsNullOrEmpty(userId)) return;
-
-            await _db.Collection("users").Document(userId)
-                    .Collection("notifications").Document(notificationId)
-                    .DeleteAsync();
+            await _ctx.Notifications.DeleteOneAsync(n => n.Id == notificationId && n.UserId == userId);
         }
 
-        // Notification helper methods for common scenarios
-        public async Task NotifyMeetupInviteAsync(string userId, string meetupTitle, string creatorName, string meetupId)
+        public Task NotifyMeetupInviteAsync(string userId, string meetupTitle, string creatorName, string meetupId)
+            => CreateNotificationAsync(userId, "meetup_invite", $"{creatorName} invited you to '{meetupTitle}'",
+                new Dictionary<string, object> { { "MeetupId", meetupId } });
+
+        public Task NotifyMeetupUpdateAsync(string userId, string meetupTitle, string updateType, string meetupId)
+            => CreateNotificationAsync(userId, "meetup_update", $"'{meetupTitle}' has been {updateType}",
+                new Dictionary<string, object> { { "MeetupId", meetupId } });
+
+        public Task NotifyFriendRequestAsync(string userId, string fromUserName, string requestId)
+            => CreateNotificationAsync(userId, "friend_request", $"{fromUserName} sent you a friend request",
+                new Dictionary<string, object> { { "FriendRequestId", requestId } });
+
+        public Task NotifyFriendRequestAcceptedAsync(string userId, string acceptedByName)
+            => CreateNotificationAsync(userId, "friend_request_accepted", $"{acceptedByName} accepted your friend request");
+
+        public Task NotifyGroupInviteAsync(string userId, string groupName, string invitedByName, string groupId)
+            => CreateNotificationAsync(userId, "group_invite", $"{invitedByName} added you to the group '{groupName}'",
+                new Dictionary<string, object> { { "GroupId", groupId } });
+
+        public Task NotifyRSVPChangeAsync(string creatorUserId, string userName, string meetupTitle, string status, string meetupId)
+            => CreateNotificationAsync(creatorUserId, "rsvp_change", $"{userName} {status} your meetup '{meetupTitle}'",
+                new Dictionary<string, object> { { "MeetupId", meetupId } });
+
+        public static NotificationDto ToDto(Notification n) => new()
         {
-            var message = $"{creatorName} invited you to '{meetupTitle}'";
-            await CreateNotificationAsync(userId, "meetup_invite", message, new Dictionary<string, object>
-            {
-                { "MeetupId", meetupId }
-            });
-        }
-
-        public async Task NotifyMeetupUpdateAsync(string userId, string meetupTitle, string updateType, string meetupId)
-        {
-            var message = $"'{meetupTitle}' has been {updateType}";
-            await CreateNotificationAsync(userId, "meetup_update", message, new Dictionary<string, object>
-            {
-                { "MeetupId", meetupId }
-            });
-        }
-
-        public async Task NotifyFriendRequestAsync(string userId, string fromUserName, string requestId)
-        {
-            var message = $"{fromUserName} sent you a friend request";
-            await CreateNotificationAsync(userId, "friend_request", message, new Dictionary<string, object>
-            {
-                { "FriendRequestId", requestId }
-            });
-        }
-
-        public async Task NotifyFriendRequestAcceptedAsync(string userId, string acceptedByName)
-        {
-            var message = $"{acceptedByName} accepted your friend request";
-            await CreateNotificationAsync(userId, "friend_request_accepted", message);
-        }
-
-        public async Task NotifyGroupInviteAsync(string userId, string groupName, string invitedByName, string groupId)
-        {
-            var message = $"{invitedByName} added you to the group '{groupName}'";
-            await CreateNotificationAsync(userId, "group_invite", message, new Dictionary<string, object>
-            {
-                { "GroupId", groupId }
-            });
-        }
-
-        public async Task NotifyRSVPChangeAsync(string creatorUserId, string userName, string meetupTitle, string status, string meetupId)
-        {
-            var message = $"{userName} {status} your meetup '{meetupTitle}'";
-            await CreateNotificationAsync(creatorUserId, "rsvp_change", message, new Dictionary<string, object>
-            {
-                { "MeetupId", meetupId }
-            });
-        }
+            Id = n.Id, Type = n.Type, Message = n.Message, CreatedAt = n.CreatedAt, IsRead = n.IsRead,
+            MeetupId = string.IsNullOrEmpty(n.MeetupId) ? null : n.MeetupId,
+            FriendRequestId = string.IsNullOrEmpty(n.FriendRequestId) ? null : n.FriendRequestId,
+            GroupId = string.IsNullOrEmpty(n.GroupId) ? null : n.GroupId,
+        };
     }
 
-    // DTO for notifications with additional metadata
     public class NotificationDto
     {
         public string Id { get; set; } = "";

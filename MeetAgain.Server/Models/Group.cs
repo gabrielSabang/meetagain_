@@ -1,35 +1,38 @@
-using Google.Cloud.Firestore;
+using MongoDB.Bson;
+using MongoDB.Bson.Serialization.Attributes;
 
 namespace MeetAgain.Server.Models
 {
     /// <summary>
-    /// Represents a friend group
-    /// Stored in groups/{groupId}
+    /// Stored in groups collection (_id = groupId).
     /// </summary>
-    [FirestoreData]
     public class Group
     {
-        [FirestoreProperty] public string Id { get; set; } = "";
-        [FirestoreProperty] public string OwnerId { get; set; } = "";
-        [FirestoreProperty] public string OwnerName { get; set; } = "";
-        [FirestoreProperty] public string Name { get; set; } = "";
-        [FirestoreProperty] public string Description { get; set; } = "";
-        [FirestoreProperty] public int MemberCount { get; set; } = 0;
-        [FirestoreProperty] public string CreatedAt { get; set; } = "";
+        [BsonId]
+        [BsonRepresentation(BsonType.String)]
+        public string Id { get; set; } = "";
+        [BsonElement("ownerId")] public string OwnerId { get; set; } = "";
+        [BsonElement("ownerName")] public string OwnerName { get; set; } = "";
+        [BsonElement("name")] public string Name { get; set; } = "";
+        [BsonElement("description")] public string Description { get; set; } = "";
+        [BsonElement("memberCount")] public int MemberCount { get; set; } = 0;
+        [BsonElement("createdAt")] public string CreatedAt { get; set; } = "";
     }
 
     /// <summary>
-    /// Represents a member of a group
-    /// Stored in groups/{groupId}/members/{userId}
+    /// Stored in groupMembers collection (groupId + userId compound key).
     /// </summary>
-    [FirestoreData]
     public class GroupMember
     {
-        [FirestoreProperty] public string UserId { get; set; } = "";
-        [FirestoreProperty] public string Name { get; set; } = "";
-        [FirestoreProperty] public string Email { get; set; } = "";
-        [FirestoreProperty] public string AddedAt { get; set; } = "";
-        [FirestoreProperty] public string AddedBy { get; set; } = ""; // UserId who added this member
+        [BsonId]
+        [BsonRepresentation(BsonType.String)]
+        public string Id { get; set; } = ""; // $"{GroupId}:{UserId}"
+        [BsonElement("groupId")] public string GroupId { get; set; } = "";
+        [BsonElement("userId")] public string UserId { get; set; } = "";
+        [BsonElement("name")] public string Name { get; set; } = "";
+        [BsonElement("email")] public string Email { get; set; } = "";
+        [BsonElement("addedAt")] public string AddedAt { get; set; } = "";
+        [BsonElement("addedBy")] public string AddedBy { get; set; } = ""; // UserId who added this member
     }
 
     /// <summary>

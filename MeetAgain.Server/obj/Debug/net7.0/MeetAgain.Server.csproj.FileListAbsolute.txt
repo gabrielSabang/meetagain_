@@ -1,9 +1,0 @@
-C:\Users\Neil\Documents\project\MeetAgain.Server\obj\Debug\net7.0\MeetAgain.Server.csproj.AssemblyReference.cache
-C:\Users\Neil\Documents\project\MeetAgain.Server\obj\Debug\net7.0\rpswa.dswa.cache.json
-C:\Users\Neil\Documents\project\MeetAgain.Server\obj\Debug\net7.0\MeetAgain.Server.GeneratedMSBuildEditorConfig.editorconfig
-C:\Users\Neil\Documents\project\MeetAgain.Server\obj\Debug\net7.0\MeetAgain.Server.AssemblyInfoInputs.cache
-C:\Users\Neil\Documents\project\MeetAgain.Server\obj\Debug\net7.0\MeetAgain.Server.AssemblyInfo.cs
-C:\Users\Neil\Documents\project\MeetAgain.Server\obj\Debug\net7.0\MeetAgain.Server.csproj.CoreCompileInputs.cache
-C:\Users\Neil\Documents\project\MeetAgain.Server\obj\Debug\net7.0\MeetAgain.Server.MvcApplicationPartsAssemblyInfo.cache
-C:\Users\Neil\Documents\project\MeetAgain.Server\obj\Debug\net7.0\MeetAgain.Server.RazorAssemblyInfo.cache
-C:\Users\Neil\Documents\project\MeetAgain.Server\obj\Debug\net7.0\MeetAgain.Server.RazorAssemblyInfo.cs

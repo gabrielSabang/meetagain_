@@ -1,15 +1,17 @@
-using MeetAgain.Server.Models;
-
-using Google.Cloud.Firestore;
+using MongoDB.Bson;
+using MongoDB.Bson.Serialization.Attributes;
 
 namespace MeetAgain.Server.Models
 {
-    [FirestoreData]
     public class GroupInvite
     {
-        [FirestoreProperty] public string UserId { get; set; } = "";
-        [FirestoreProperty] public string SentBy { get; set; } = "";
-        [FirestoreProperty] public string SentAt { get; set; } = "";
-        [FirestoreProperty] public string Status { get; set; } = "pending";
+        [BsonId]
+        [BsonRepresentation(BsonType.String)]
+        public string Id { get; set; } = "";
+        [BsonElement("groupId")] public string GroupId { get; set; } = "";
+        [BsonElement("userId")] public string UserId { get; set; } = "";
+        [BsonElement("sentBy")] public string SentBy { get; set; } = "";
+        [BsonElement("sentAt")] public string SentAt { get; set; } = "";
+        [BsonElement("status")] public string Status { get; set; } = "pending";
     }
 }

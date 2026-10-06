@@ -1,0 +1,249 @@
+@base = http://localhost:5082
+@token = YOUR_JWT_HERE
+@userId = YOUR_USER_ID_HERE
+@meetupId = YOUR_MEETUP_ID_HERE
+@groupId = YOUR_GROUP_ID_HERE
+@friendEmail = friend@example.com
+@notifId = YOUR_NOTIFICATION_ID_HERE
+
+### Health (no auth)
+GET {{base}}/health
+Accept: application/json
+
+### Health (versioned)
+GET {{base}}/api/v1/health
+Accept: application/json
+
+### Auth: signup
+POST {{base}}/api/v1/auth/signup
+Content-Type: application/json
+
+{
+  "email": "test@example.com",
+  "password": "Password123!",
+  "displayName": "Test User"
+}
+
+### Auth: login
+POST {{base}}/api/v1/auth/login
+Content-Type: application/json
+
+{
+  "email": "test@example.com",
+  "password": "Password123!"
+}
+
+### Auth: me (Bearer)
+GET {{base}}/api/v1/auth/me
+Authorization: Bearer {{token}}
+Accept: application/json
+
+### Auth: me (X-User-Id dev fallback)
+GET {{base}}/api/v1/auth/me?userId={{userId}}
+Accept: application/json
+
+### Users: list (paginated)
+GET {{base}}/api/v1/users?page=1&pageSize=20
+Authorization: Bearer {{token}}
+Accept: application/json
+
+### Users: search by email
+GET {{base}}/api/v1/users/search?email={{friendEmail}}&userId={{userId}}
+Authorization: Bearer {{token}}
+Accept: application/json
+
+### Users: get by id
+GET {{base}}/api/v1/users/{{userId}}
+Authorization: Bearer {{token}}
+Accept: application/json
+
+### Users: update
+PUT {{base}}/api/v1/users/{{userId}}
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "displayName": "Updated Name"
+}
+
+### Meetups: mine
+GET {{base}}/api/v1/meetups?userId={{userId}}
+Authorization: Bearer {{token}}
+Accept: application/json
+
+### Meetups: create
+POST {{base}}/api/v1/meetups
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "userId": "{{userId}}",
+  "title": "Weekend Hike",
+  "description": "Morning hike",
+  "eventDateTime": "2026-10-05T09:00:00Z",
+  "location": "Trailhead",
+  "invitedFriendIds": []
+}
+
+### Meetups: detail
+GET {{base}}/api/v1/meetups/{{meetupId}}?userId={{userId}}
+Authorization: Bearer {{token}}
+Accept: application/json
+
+### Meetups: update
+PUT {{base}}/api/v1/meetups/{{meetupId}}
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "userId": "{{userId}}",
+  "title": "Weekend Hike (updated)",
+  "status": "confirmed"
+}
+
+### Meetups: rsvp
+POST {{base}}/api/v1/meetups/{{meetupId}}/rsvp
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "userId": "{{userId}}",
+  "status": "accepted"
+}
+
+### Meetups: delete
+DELETE {{base}}/api/v1/meetups/{{meetupId}}?userId={{userId}}
+Authorization: Bearer {{token}}
+
+### Friends: list
+GET {{base}}/api/v1/friends?userId={{userId}}
+Authorization: Bearer {{token}}
+Accept: application/json
+
+### Friends: pending requests
+GET {{base}}/api/v1/friends/requests?userId={{userId}}
+Authorization: Bearer {{token}}
+Accept: application/json
+
+### Friends: send request
+POST {{base}}/api/v1/friends/requests
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "userId": "{{userId}}",
+  "recipientEmail": "{{friendEmail}}"
+}
+
+### Friends: accept request
+POST {{base}}/api/v1/friends/requests/{{userId}}/accept
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "userId": "{{userId}}"
+}
+
+### Friends: reject request
+POST {{base}}/api/v1/friends/requests/{{userId}}/reject
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "userId": "{{userId}}"
+}
+
+### Friends: remove
+DELETE {{base}}/api/v1/friends/{{userId}}?userId={{userId}}
+Authorization: Bearer {{token}}
+
+### Groups: mine
+GET {{base}}/api/v1/groups?userId={{userId}}
+Authorization: Bearer {{token}}
+Accept: application/json
+
+### Groups: create
+POST {{base}}/api/v1/groups
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "userId": "{{userId}}",
+  "name": "Hiking Crew",
+  "description": "Weekend hikes",
+  "initialMemberIds": []
+}
+
+### Groups: detail
+GET {{base}}/api/v1/groups/{{groupId}}?userId={{userId}}
+Authorization: Bearer {{token}}
+Accept: application/json
+
+### Groups: add members
+POST {{base}}/api/v1/groups/{{groupId}}/members
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "userId": "{{userId}}",
+  "memberIds": ["{{userId}}"]
+}
+
+### Groups: remove member
+DELETE {{base}}/api/v1/groups/{{groupId}}/members/{{userId}}?userId={{userId}}
+Authorization: Bearer {{token}}
+
+### Groups: delete
+DELETE {{base}}/api/v1/groups/{{groupId}}?userId={{userId}}
+Authorization: Bearer {{token}}
+
+### Notifications: mine
+GET {{base}}/api/v1/notifications?userId={{userId}}
+Authorization: Bearer {{token}}
+Accept: application/json
+
+### Notifications: unread count
+GET {{base}}/api/v1/notifications/unread-count?userId={{userId}}
+Authorization: Bearer {{token}}
+Accept: application/json
+
+### Notifications: mark read
+POST {{base}}/api/v1/notifications/{{notifId}}/read?userId={{userId}}
+Authorization: Bearer {{token}}
+
+### Notifications: mark all read
+POST {{base}}/api/v1/notifications/read-all?userId={{userId}}
+Authorization: Bearer {{token}}
+
+### Notifications: delete
+DELETE {{base}}/api/v1/notifications/{{notifId}}?userId={{userId}}
+Authorization: Bearer {{token}}
+
+### Availability: get
+GET {{base}}/api/v1/availability/{{userId}}
+Authorization: Bearer {{token}}
+Accept: application/json
+
+### Availability: save
+PUT {{base}}/api/v1/availability/{{userId}}
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "preferredDays": ["Monday", "Wednesday", "Friday"],
+  "availableTimeSlots": [{ "start": "09:00", "end": "18:00" }],
+  "blockedDates": []
+}
+
+### Availability: suggest
+POST {{base}}/api/v1/availability/suggest
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "participantUserIds": ["{{userId}}"],
+  "startDate": "2026-10-01T00:00:00Z",
+  "endDate": "2026-10-07T00:00:00Z",
+  "durationMinutes": 120,
+  "maxSuggestions": 5
+}

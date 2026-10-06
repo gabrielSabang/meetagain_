@@ -1,26 +1,30 @@
-using Google.Cloud.Firestore;
 using MeetAgain.Server.Models;
 using MeetAgain.Server.Services;
+using MeetAgain.Server.Services.Mongo;
 using Microsoft.AspNetCore.Mvc;
+using MongoDB.Driver;
 
 namespace MeetAgain.Server.Controllers
 {
     [ApiController]
     [Route("api/groups")]
+    [Route("api/v1/groups")]
     public class GroupsController : ControllerBase
     {
-        private readonly FirestoreDb _db;
+        private readonly MongoDbContext _ctx;
 
-        public GroupsController(FirestoreDb db)
-        {
-            _db = db;
-        }
+        public GroupsController(MongoDbContext ctx) => _ctx = ctx;
 
         private Task<string?> CallerUidAsync(string? q = null, string? b = null)
             => ApiUserContext.RequireUserIdAsync(HttpContext, q, b);
 
-        private IActionResult NeedAuth() =>
-            Unauthorized(new { error = "Missing user identity. Send Authorization: Bearer <FirebaseIdToken>, X-User-Id header, or userId in query/body." });
+        private static IActionResult NeedAuth() => new UnauthorizedObjectResult(ApiErrors.Unauthorized());
+
+        private static GroupDto ToDto(Models.Group g, bool isOwner) => new()
+        {
+            Id = g.Id, OwnerId = g.OwnerId, OwnerName = g.OwnerName, Name = g.Name,
+            Description = g.Description, MemberCount = g.MemberCount, CreatedAt = g.CreatedAt, IsOwner = isOwner,
+        };
 
         // GET /api/groups?userId={uid}
         [HttpGet]
@@ -29,20 +33,17 @@ namespace MeetAgain.Server.Controllers
             var uid = await CallerUidAsync(userId);
             if (uid == null) return NeedAuth();
 
-            var all = await _db.Collection("groups").GetSnapshotAsync();
-            var result = new List<GroupDto>();
-            foreach (var g in all.Documents)
-            {
-                var group = g.ConvertTo<Group>();
-                if (group.OwnerId == uid)
-                {
-                    result.Add(new GroupDto { Id = group.Id, OwnerId = group.OwnerId, OwnerName = group.OwnerName, Name = group.Name, Description = group.Description, MemberCount = group.MemberCount, CreatedAt = group.CreatedAt, IsOwner = true });
-                    continue;
-                }
-                if ((await _db.Collection("groups").Document(group.Id).Collection("members").Document(uid).GetSnapshotAsync()).Exists)
-                    result.Add(new GroupDto { Id = group.Id, OwnerId = group.OwnerId, OwnerName = group.OwnerName, Name = group.Name, Description = group.Description, MemberCount = group.MemberCount, CreatedAt = group.CreatedAt, IsOwner = false });
-            }
-            return Ok(result.OrderBy(g => g.Name).ToList());
+            var owned = await _ctx.Groups.Find(g => g.OwnerId == uid).ToListAsync();
+            var memberships = await _ctx.GroupMembers.Find(m => m.UserId == uid).ToListAsync();
+            var memberIds = memberships.Select(m => m.GroupId).Distinct().ToHashSet();
+            var memberGroups = memberIds.Count > 0
+                ? await _ctx.Groups.Find(g => memberIds.Contains(g.Id)).ToListAsync()
+                : new List<Models.Group>();
+
+            var result = owned.Select(g => ToDto(g, true))
+                .Concat(memberGroups.Where(g => g.OwnerId != uid).Select(g => ToDto(g, false)))
+                .OrderBy(g => g.Name).ToList();
+            return Ok(result);
         }
 
         // GET /api/groups/{id}?userId={uid}
@@ -52,19 +53,12 @@ namespace MeetAgain.Server.Controllers
             var uid = await CallerUidAsync(userId);
             if (uid == null) return NeedAuth();
 
-            var doc = await _db.Collection("groups").Document(id).GetSnapshotAsync();
-            if (!doc.Exists) return NotFound(new { error = "Group not found." });
-            var group = doc.ConvertTo<Group>();
-
-            var membersSnap = await _db.Collection("groups").Document(id).Collection("members").GetSnapshotAsync();
-            var members = membersSnap.Documents.Select(d => d.ConvertTo<GroupMember>()).OrderBy(m => m.Name).ToList();
-
-            return Ok(new GroupDto
-            {
-                Id = group.Id, OwnerId = group.OwnerId, OwnerName = group.OwnerName,
-                Name = group.Name, Description = group.Description, MemberCount = group.MemberCount,
-                CreatedAt = group.CreatedAt, IsOwner = group.OwnerId == uid, Members = members
-            });
+            var group = await _ctx.Groups.Find(g => g.Id == id).FirstOrDefaultAsync();
+            if (group == null) return NotFound(ApiErrors.NotFound("Group not found."));
+            var members = await _ctx.GroupMembers.Find(m => m.GroupId == id).SortBy(m => m.Name).ToListAsync();
+            var dto = ToDto(group, group.OwnerId == uid);
+            dto.Members = members;
+            return Ok(dto);
         }
 
         // POST /api/groups  { userId, name, description, initialMemberIds[] }
@@ -73,21 +67,22 @@ namespace MeetAgain.Server.Controllers
         {
             var uid = await CallerUidAsync(null, req.UserId);
             if (uid == null) return NeedAuth();
-            if (string.IsNullOrWhiteSpace(req.Name)) return BadRequest(new { error = "name is required." });
+            if (!ModelState.IsValid)
+                return BadRequest(ApiErrors.BadRequest("Validation failed.", ModelState));
+            if (string.IsNullOrWhiteSpace(req.Name)) return BadRequest(ApiErrors.BadRequest("name is required."));
 
-            var userDoc = await _db.Collection("users").Document(uid).GetSnapshotAsync();
-            if (!userDoc.Exists) return NotFound(new { error = "Caller user document not found." });
-            var ownerName = userDoc.ToDictionary().TryGetValue("DisplayName", out var n) ? n?.ToString() ?? "" : "";
+            var me = await _ctx.Users.Find(u => u.Uid == uid).FirstOrDefaultAsync();
+            if (me == null) return NotFound(ApiErrors.NotFound("Caller user document not found."));
 
             var groupId = Guid.NewGuid().ToString("N");
-            var group = new Group
+            var group = new Models.Group
             {
-                Id = groupId, OwnerId = uid, OwnerName = ownerName,
-                Name = req.Name, Description = req.Description,
+                Id = groupId, OwnerId = uid, OwnerName = me.DisplayName,
+                Name = req.Name.Trim(), Description = req.Description ?? "",
                 MemberCount = req.InitialMemberIds?.Count ?? 0,
-                CreatedAt = DateTime.UtcNow.ToString("o")
+                CreatedAt = DateTime.UtcNow.ToString("o"),
             };
-            await _db.Collection("groups").Document(groupId).SetAsync(group);
+            await _ctx.Groups.InsertOneAsync(group);
 
             if (req.InitialMemberIds is { Count: > 0 })
                 await AddMembersInternalAsync(groupId, uid, req.InitialMemberIds);
@@ -113,15 +108,12 @@ namespace MeetAgain.Server.Controllers
             var uid = await CallerUidAsync(userId);
             if (uid == null) return NeedAuth();
 
-            var doc = await _db.Collection("groups").Document(id).GetSnapshotAsync();
-            if (!doc.Exists) return NotFound(new { error = "Group not found." });
-            var group = doc.ConvertTo<Group>();
+            var group = await _ctx.Groups.Find(g => g.Id == id).FirstOrDefaultAsync();
+            if (group == null) return NotFound(ApiErrors.NotFound("Group not found."));
             if (group.OwnerId != uid) return Forbid();
 
-            var batch = _db.StartBatch();
-            batch.Delete(_db.Collection("groups").Document(id).Collection("members").Document(memberId));
-            batch.Update(_db.Collection("groups").Document(id), new Dictionary<string, object> { { "MemberCount", Math.Max(0, group.MemberCount - 1) } });
-            await batch.CommitAsync();
+            await _ctx.GroupMembers.DeleteOneAsync(m => m.Id == $"{id}:{memberId}");
+            await _ctx.Groups.UpdateOneAsync(g => g.Id == id, Builders<Models.Group>.Update.Inc(g => g.MemberCount, -1));
             return Ok(new { message = "Member removed." });
         }
 
@@ -132,15 +124,12 @@ namespace MeetAgain.Server.Controllers
             var uid = await CallerUidAsync(userId);
             if (uid == null) return NeedAuth();
 
-            var doc = await _db.Collection("groups").Document(id).GetSnapshotAsync();
-            if (!doc.Exists) return NotFound(new { error = "Group not found." });
-            if (doc.ConvertTo<Group>().OwnerId != uid) return Forbid();
+            var group = await _ctx.Groups.Find(g => g.Id == id).FirstOrDefaultAsync();
+            if (group == null) return NotFound(ApiErrors.NotFound("Group not found."));
+            if (group.OwnerId != uid) return Forbid();
 
-            var members = await _db.Collection("groups").Document(id).Collection("members").GetSnapshotAsync();
-            var batch = _db.StartBatch();
-            foreach (var m in members.Documents) batch.Delete(m.Reference);
-            batch.Delete(_db.Collection("groups").Document(id));
-            await batch.CommitAsync();
+            await _ctx.GroupMembers.DeleteManyAsync(m => m.GroupId == id);
+            await _ctx.Groups.DeleteOneAsync(g => g.Id == id);
             return Ok(new { message = "Group deleted." });
         }
 
@@ -148,34 +137,26 @@ namespace MeetAgain.Server.Controllers
         {
             try
             {
-                var doc = await _db.Collection("groups").Document(groupId).GetSnapshotAsync();
-                if (!doc.Exists) return false;
-                var group = doc.ConvertTo<Group>();
-                if (group.OwnerId != ownerUid) return false;
+                var group = await _ctx.Groups.Find(g => g.Id == groupId).FirstOrDefaultAsync();
+                if (group == null || group.OwnerId != ownerUid) return false;
 
-                var batch = _db.StartBatch();
                 var added = 0;
                 foreach (var fid in friendIds.Distinct())
                 {
-                    if ((await _db.Collection("groups").Document(groupId).Collection("members").Document(fid).GetSnapshotAsync()).Exists)
-                        continue;
-                    var friend = await _db.Collection("users").Document(fid).GetSnapshotAsync();
-                    if (!friend.Exists) continue;
-                    var fd = friend.ToDictionary();
-                    batch.Set(_db.Collection("groups").Document(groupId).Collection("members").Document(fid),
-                        new GroupMember
-                        {
-                            UserId = fid,
-                            Name = fd.TryGetValue("DisplayName", out var n) ? n?.ToString() ?? "" : "",
-                            Email = fd.TryGetValue("Email", out var e) ? e?.ToString() ?? "" : "",
-                            AddedAt = DateTime.UtcNow.ToString("o"),
-                            AddedBy = ownerUid
-                        });
+                    if (await _ctx.GroupMembers.Find(m => m.Id == $"{groupId}:{fid}").AnyAsync()) continue;
+                    var friend = await _ctx.Users.Find(u => u.Uid == fid).FirstOrDefaultAsync();
+                    if (friend == null) continue;
+                    await _ctx.GroupMembers.InsertOneAsync(new GroupMember
+                    {
+                        Id = $"{groupId}:{fid}", GroupId = groupId, UserId = fid,
+                        Name = friend.DisplayName, Email = friend.Email,
+                        AddedAt = DateTime.UtcNow.ToString("o"), AddedBy = ownerUid,
+                    });
                     added++;
                 }
                 if (added > 0)
-                    batch.Update(_db.Collection("groups").Document(groupId), new Dictionary<string, object> { { "MemberCount", group.MemberCount + added } });
-                await batch.CommitAsync();
+                    await _ctx.Groups.UpdateOneAsync(g => g.Id == groupId,
+                        Builders<Models.Group>.Update.Inc(g => g.MemberCount, added));
                 return true;
             }
             catch { return false; }
