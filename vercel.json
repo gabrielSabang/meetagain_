@@ -1,0 +1,11 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "version": 2,
+  "buildCommand": "dotnet publish MeetAgain.Server/MeetAgain.Server.csproj -c Release -o out",
+  "outputDirectory": "out",
+  "installCommand": "dotnet restore",
+  "framework": null,
+  "rewrites": [
+    { "source": "/(.*)", "destination": "/index.html" }
+  ]
+}
